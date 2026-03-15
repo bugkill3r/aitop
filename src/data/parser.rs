@@ -72,10 +72,9 @@ fn cost_per_mtok(model: &str) -> (f64, f64, f64, f64) {
         (15.0, 75.0, 1.50, 18.75)
     } else if model_lower.contains("haiku") {
         (0.80, 4.0, 0.08, 1.0)
-    } else if model_lower.contains("sonnet") {
-        (3.0, 15.0, 0.30, 3.75)
     } else {
-        (3.0, 15.0, 0.30, 3.75) // default to sonnet
+        // Default to Sonnet pricing (also covers explicit "sonnet" match)
+        (3.0, 15.0, 0.30, 3.75)
     }
 }
 

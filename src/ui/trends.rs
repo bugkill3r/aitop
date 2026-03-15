@@ -171,9 +171,7 @@ fn render_heatmap(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui:
         for h in (0..24).step_by(2) {
             // Average the two hours in each slot
             let val = (state.heatmap[dow][h] + state.heatmap[dow][(h + 1).min(23)]) / 2.0;
-            let block_char = if val <= 0.0 {
-                "\u{2591}\u{2591}" // ░░
-            } else if val <= q1 {
+            let block_char = if val <= q1 {
                 "\u{2591}\u{2591}" // ░░
             } else if val <= q2 {
                 "\u{2592}\u{2592}" // ▒▒
@@ -289,8 +287,8 @@ fn render_contribution_calendar(f: &mut Frame, state: &AppState, theme: &Theme, 
             Style::default().fg(theme.text_dim),
         )];
 
-        for week in 0..12 {
-            let val = grid[dow][week];
+        for val in &grid[dow][..12] {
+            let val = *val;
             let (ch, color) = if val <= 0.0 {
                 ("\u{2591}", theme.bar_empty)
             } else if val <= q1 {

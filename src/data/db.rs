@@ -164,7 +164,7 @@ impl Database {
             .parent()
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
-            .map(|dir_name| super::parser::decode_project_name(dir_name))
+            .map(super::parser::decode_project_name)
             .unwrap_or_else(|| "unknown".to_string());
 
         let sf = SessionFile {

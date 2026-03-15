@@ -173,10 +173,7 @@ fn run_tui(
     let (watcher_tx, watcher_rx) = mpsc::channel::<String>();
     let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::unbounded_channel::<FsEvent>();
     let _watcher = if projects_dir.exists() {
-        match watch_directory(projects_dir, tokio_tx) {
-            Ok(w) => Some(w),
-            Err(_) => None,
-        }
+        watch_directory(projects_dir, tokio_tx).ok()
     } else {
         None
     };
@@ -273,13 +270,10 @@ fn run_event_loop(
         // Check for file watcher events
         let mut got_fs_event = false;
         while let Ok(path) = watcher_rx.try_recv() {
-            match write_db.ingest_file_by_path(&path) {
-                Ok((project, _offset)) => {
-                    state.last_live_event = Some(Instant::now());
-                    state.live_project = Some(project);
-                    got_fs_event = true;
-                }
-                Err(_) => {}
+            if let Ok((project, _offset)) = write_db.ingest_file_by_path(&path) {
+                state.last_live_event = Some(Instant::now());
+                state.live_project = Some(project);
+                got_fs_event = true;
             }
         }
 
