@@ -69,6 +69,60 @@ pub struct ActivityEntry {
     pub cost_usd: f64,
 }
 
+/// Individual message within a session (for detail popup).
+#[derive(Debug, Clone)]
+pub struct SessionMessage {
+    pub id: String,
+    pub timestamp: String,
+    pub model: String,
+    pub msg_type: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read: i64,
+    pub cache_creation: i64,
+    pub cost_usd: f64,
+}
+
+/// Delta banner data: changes since last check.
+#[derive(Debug, Clone, Default)]
+pub struct DeltaBanner {
+    pub last_checked_label: String,  // e.g., "2h ago"
+    pub spend_delta: f64,
+    pub new_sessions: i64,
+    pub model_changes: Vec<ModelChange>,
+}
+
+/// Per-model change since last check.
+#[derive(Debug, Clone)]
+pub struct ModelChange {
+    pub model: String,
+    pub pct_change: f64, // positive = increase
+}
+
+/// Per-project cost attribution.
+#[derive(Debug, Clone)]
+pub struct ProjectCost {
+    pub name: String,
+    pub cost: f64,
+    pub percentage: f64,
+}
+
+/// Token efficiency stats.
+#[derive(Debug, Clone, Default)]
+pub struct EfficiencyStats {
+    pub tokens_per_dollar: f64,
+    pub tokens_per_dollar_last_week: f64,
+    pub efficiency_change_pct: f64,
+    pub cache_savings_usd: f64,
+}
+
+/// Contribution calendar day.
+#[derive(Debug, Clone)]
+pub struct ContributionDay {
+    pub date: String,
+    pub cost: f64,
+}
+
 pub struct Aggregator {
     conn: Connection,
 }
@@ -268,5 +322,322 @@ impl Aggregator {
         } else {
             Ok(result.0 as f64 / result.1 as f64)
         }
+    }
+
+    /// Compute delta banner data since a given ISO timestamp.
+    pub fn delta_since(&self, since_ts: &str) -> Result<DeltaBanner> {
+        // Compute how long ago
+        let last_checked_label = format_since_label(since_ts);
+
+        // Spend delta
+        let spend_delta: f64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(cost_usd), 0) FROM messages WHERE timestamp > ?1",
+            params![since_ts],
+            |row| row.get(0),
+        )?;
+
+        // New sessions since
+        let new_sessions: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE started_at > ?1",
+            params![since_ts],
+            |row| row.get(0),
+        )?;
+
+        // Model cost breakdown: current period vs previous period of same length
+        let mut model_changes = Vec::new();
+
+        // Get model costs in the "since" period
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(model, 'unknown'), SUM(cost_usd)
+             FROM messages
+             WHERE timestamp > ?1 AND model IS NOT NULL AND model != ''
+             GROUP BY model
+             ORDER BY SUM(cost_usd) DESC
+             LIMIT 5",
+        )?;
+        let current_models: Vec<(String, f64)> = stmt.query_map(params![since_ts], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })?.filter_map(|r| r.ok()).collect();
+
+        let total_current: f64 = current_models.iter().map(|(_, c)| c).sum();
+
+        // Get total cost from previous equivalent period for comparison
+        // We approximate: if since_ts was 2h ago, compare with the 2h before that
+        let total_previous: f64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(cost_usd), 0) FROM messages
+             WHERE timestamp <= ?1
+               AND timestamp > datetime(?1, '-' || (strftime('%s', 'now') - strftime('%s', ?1)) || ' seconds')",
+            params![since_ts],
+            |row| row.get(0),
+        ).unwrap_or(0.0);
+
+        // Get model costs in previous period
+        let mut stmt_prev = self.conn.prepare(
+            "SELECT COALESCE(model, 'unknown'), SUM(cost_usd)
+             FROM messages
+             WHERE timestamp <= ?1
+               AND timestamp > datetime(?1, '-' || (strftime('%s', 'now') - strftime('%s', ?1)) || ' seconds')
+               AND model IS NOT NULL AND model != ''
+             GROUP BY model",
+        )?;
+        let prev_models: Vec<(String, f64)> = stmt_prev.query_map(params![since_ts], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })?.filter_map(|r| r.ok()).collect();
+
+        // Compute per-model percentage share changes
+        for (model, cost) in &current_models {
+            let current_pct = if total_current > 0.0 { cost / total_current * 100.0 } else { 0.0 };
+            let prev_cost = prev_models.iter().find(|(m, _)| m == model).map(|(_, c)| *c).unwrap_or(0.0);
+            let prev_pct = if total_previous > 0.0 { prev_cost / total_previous * 100.0 } else { 0.0 };
+            let pct_change = current_pct - prev_pct;
+            if pct_change.abs() > 1.0 {
+                let short = model.replace("claude-", "").replace("-20241022", "").replace("-20250514", "");
+                model_changes.push(ModelChange {
+                    model: short,
+                    pct_change,
+                });
+            }
+        }
+        // Sort by absolute change descending, limit to top 3
+        model_changes.sort_by(|a, b| b.pct_change.abs().partial_cmp(&a.pct_change.abs()).unwrap_or(std::cmp::Ordering::Equal));
+        model_changes.truncate(3);
+
+        Ok(DeltaBanner {
+            last_checked_label,
+            spend_delta,
+            new_sessions,
+            model_changes,
+        })
+    }
+
+    /// Per-project cost attribution.
+    pub fn project_costs(&self) -> Result<Vec<ProjectCost>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.project, COALESCE(SUM(m.cost_usd), 0) as total_cost
+             FROM sessions s
+             JOIN messages m ON s.id = m.session_id
+             GROUP BY s.project
+             ORDER BY total_cost DESC",
+        )?;
+
+        let rows: Vec<(String, f64)> = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })?.filter_map(|r| r.ok()).collect();
+
+        let grand_total: f64 = rows.iter().map(|(_, c)| c).sum();
+
+        let mut results = Vec::new();
+        for (name, cost) in rows {
+            let percentage = if grand_total > 0.0 { cost / grand_total * 100.0 } else { 0.0 };
+            results.push(ProjectCost { name, cost, percentage });
+        }
+
+        Ok(results)
+    }
+
+    /// Hourly heatmap: 7 rows (dow 0=Sun..6=Sat) x 24 cols (hours).
+    pub fn hourly_heatmap(&self) -> Result<Vec<Vec<f64>>> {
+        let mut heatmap = vec![vec![0.0f64; 24]; 7];
+
+        let mut stmt = self.conn.prepare(
+            "SELECT CAST(strftime('%w', timestamp) AS INTEGER) as dow,
+                    CAST(strftime('%H', timestamp) AS INTEGER) as hour,
+                    SUM(cost_usd)
+             FROM messages
+             GROUP BY dow, hour",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, f64>(2)?))
+        })?;
+
+        for row in rows.flatten() {
+            let (dow, hour, cost) = row;
+            if (0..7).contains(&dow) && (0..24).contains(&hour) {
+                heatmap[dow as usize][hour as usize] = cost;
+            }
+        }
+
+        Ok(heatmap)
+    }
+
+    /// Token efficiency stats.
+    pub fn efficiency_stats(&self) -> Result<EfficiencyStats> {
+        // Current week
+        let (this_week_tokens, this_week_cost): (i64, f64) = self.conn.query_row(
+            "SELECT COALESCE(SUM(input_tokens + output_tokens), 0),
+                    COALESCE(SUM(cost_usd), 0)
+             FROM messages
+             WHERE timestamp > datetime('now', '-7 days')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        // Last week (7-14 days ago)
+        let (last_week_tokens, last_week_cost): (i64, f64) = self.conn.query_row(
+            "SELECT COALESCE(SUM(input_tokens + output_tokens), 0),
+                    COALESCE(SUM(cost_usd), 0)
+             FROM messages
+             WHERE timestamp > datetime('now', '-14 days') AND timestamp <= datetime('now', '-7 days')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        let tokens_per_dollar = if this_week_cost > 0.0 {
+            this_week_tokens as f64 / this_week_cost
+        } else {
+            0.0
+        };
+        let tokens_per_dollar_last_week = if last_week_cost > 0.0 {
+            last_week_tokens as f64 / last_week_cost
+        } else {
+            0.0
+        };
+        let efficiency_change_pct = if tokens_per_dollar_last_week > 0.0 {
+            (tokens_per_dollar - tokens_per_dollar_last_week) / tokens_per_dollar_last_week * 100.0
+        } else {
+            0.0
+        };
+
+        // Cache savings: cache_read tokens * (normal_input_price - cache_price) per million
+        // We approximate using sonnet pricing as the average: input=$3, cache=$0.30 => savings = $2.70/Mtok
+        // For a more accurate measure, we compute per-model
+        let cache_savings: f64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(
+                CASE
+                    WHEN LOWER(model) LIKE '%opus%' THEN cache_read * (15.0 - 1.50) / 1000000.0
+                    WHEN LOWER(model) LIKE '%haiku%' THEN cache_read * (0.80 - 0.08) / 1000000.0
+                    ELSE cache_read * (3.0 - 0.30) / 1000000.0
+                END
+             ), 0)
+             FROM messages
+             WHERE model IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
+
+        Ok(EfficiencyStats {
+            tokens_per_dollar,
+            tokens_per_dollar_last_week,
+            efficiency_change_pct,
+            cache_savings_usd: cache_savings,
+        })
+    }
+
+    /// Contribution calendar: daily spend for last 84 days (12 weeks).
+    pub fn contribution_calendar(&self) -> Result<Vec<ContributionDay>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT date(timestamp) as day, SUM(cost_usd)
+             FROM messages
+             WHERE timestamp > datetime('now', '-84 days')
+             GROUP BY day
+             ORDER BY day",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(ContributionDay {
+                date: row.get(0)?,
+                cost: row.get(1)?,
+            })
+        })?;
+
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Get detailed messages for a specific session (for session detail popup).
+    pub fn session_detail(&self, session_id: &str) -> Result<Vec<SessionMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, m.timestamp, COALESCE(m.model, 'unknown'), m.type,
+                    m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd
+             FROM messages m
+             WHERE m.session_id = ?1
+             ORDER BY m.timestamp ASC",
+        )?;
+
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok(SessionMessage {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                model: row.get(2)?,
+                msg_type: row.get(3)?,
+                input_tokens: row.get(4)?,
+                output_tokens: row.get(5)?,
+                cache_read: row.get(6)?,
+                cache_creation: row.get(7)?,
+                cost_usd: row.get(8)?,
+            })
+        })?;
+
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Get daily costs per session for the last 7 days (for sparklines).
+    pub fn session_daily_costs(&self) -> Result<std::collections::HashMap<String, Vec<f64>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.session_id, date(m.timestamp) as day, SUM(m.cost_usd)
+             FROM messages m
+             WHERE m.timestamp > datetime('now', '-7 days')
+             GROUP BY m.session_id, day
+             ORDER BY m.session_id, day",
+        )?;
+
+        let mut result: std::collections::HashMap<String, Vec<(String, f64)>> =
+            std::collections::HashMap::new();
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
+        })?;
+
+        for row in rows.flatten() {
+            result.entry(row.0).or_default().push((row.1, row.2));
+        }
+
+        let today = chrono::Utc::now().date_naive();
+        let dates: Vec<String> = (0..7)
+            .rev()
+            .map(|i| (today - chrono::Duration::days(i)).format("%Y-%m-%d").to_string())
+            .collect();
+
+        let mut output: std::collections::HashMap<String, Vec<f64>> =
+            std::collections::HashMap::new();
+        for (session_id, day_costs) in &result {
+            let mut costs = Vec::with_capacity(7);
+            for date in &dates {
+                let cost = day_costs
+                    .iter()
+                    .find(|(d, _)| d == date)
+                    .map(|(_, c)| *c)
+                    .unwrap_or(0.0);
+                costs.push(cost);
+            }
+            output.insert(session_id.clone(), costs);
+        }
+
+        Ok(output)
+    }
+}
+
+/// Format a timestamp into a human-readable "since" label.
+fn format_since_label(iso: &str) -> String {
+    use chrono::{DateTime, Utc};
+    let Ok(dt) = iso.parse::<DateTime<Utc>>() else {
+        return "unknown".to_string();
+    };
+    let now = Utc::now();
+    let diff = now - dt;
+
+    if diff.num_minutes() < 1 {
+        "just now".to_string()
+    } else if diff.num_minutes() < 60 {
+        format!("{}m ago", diff.num_minutes())
+    } else if diff.num_hours() < 24 {
+        format!("{}h ago", diff.num_hours())
+    } else if diff.num_days() < 7 {
+        format!("{}d ago", diff.num_days())
+    } else {
+        format!("{}w ago", diff.num_days() / 7)
     }
 }

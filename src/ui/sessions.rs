@@ -5,9 +5,22 @@ use ratatui::widgets::{Block, Borders, Row, Table};
 use ratatui::Frame;
 
 use super::theme::Theme;
-use crate::app::AppState;
+use crate::app::{AppState, SessionSort};
+
 pub fn render_sessions(f: &mut Frame, state: &mut AppState, theme: &Theme) {
     let area = state.content_area;
+
+    let sort_indicator = state.sort_indicator();
+    let filter_label = if !state.filter_text.is_empty() {
+        format!(" [filter: {}]", state.filter_text)
+    } else {
+        String::new()
+    };
+
+    let cost_suffix = if state.session_sort == SessionSort::Cost { sort_indicator } else { "" };
+    let tokens_suffix = if state.session_sort == SessionSort::Tokens { sort_indicator } else { "" };
+    let project_suffix = if state.session_sort == SessionSort::Project { sort_indicator } else { "" };
+    let updated_suffix = if state.session_sort == SessionSort::Recent { sort_indicator } else { "" };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -16,22 +29,26 @@ pub fn render_sessions(f: &mut Frame, state: &mut AppState, theme: &Theme) {
             Span::styled(" S", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
             Span::styled("essions ", Style::default().fg(theme.text)),
             Span::styled(
-                format!("({}) ", state.sessions.len()),
+                format!("({}) ", state.displayed_sessions().len()),
                 Style::default().fg(theme.text_dim),
+            ),
+            Span::styled(
+                filter_label,
+                Style::default().fg(theme.tertiary),
             ),
             Span::raw("  "),
             Span::styled("c", Style::default().fg(theme.tertiary).add_modifier(Modifier::UNDERLINED)),
-            Span::styled("ost ", Style::default().fg(theme.text_dim)),
+            Span::styled(format!("ost{} ", cost_suffix), Style::default().fg(theme.text_dim)),
             Span::styled("n", Style::default().fg(theme.tertiary).add_modifier(Modifier::UNDERLINED)),
-            Span::styled("tokens ", Style::default().fg(theme.text_dim)),
+            Span::styled(format!("tokens{} ", tokens_suffix), Style::default().fg(theme.text_dim)),
             Span::styled("p", Style::default().fg(theme.tertiary).add_modifier(Modifier::UNDERLINED)),
-            Span::styled("roject ", Style::default().fg(theme.text_dim)),
+            Span::styled(format!("roject{} ", project_suffix), Style::default().fg(theme.text_dim)),
             Span::styled("u", Style::default().fg(theme.tertiary).add_modifier(Modifier::UNDERLINED)),
-            Span::styled("pdated ", Style::default().fg(theme.text_dim)),
+            Span::styled(format!("pdated{} ", updated_suffix), Style::default().fg(theme.text_dim)),
         ]));
 
     let header = Row::new(vec![
-        "#", "Project", "Model", "Tokens", "Cost", "Messages", "Updated",
+        "#", "Project", "Model", "Tokens", "Cost", "Msgs", "7d", "Updated",
     ])
     .style(
         Style::default()
@@ -40,7 +57,7 @@ pub fn render_sessions(f: &mut Frame, state: &mut AppState, theme: &Theme) {
     )
     .bottom_margin(0);
 
-    let sessions = &state.sessions;
+    let sessions = state.displayed_sessions().to_vec();
     let rows: Vec<Row> = sessions
         .iter()
         .enumerate()
@@ -56,6 +73,12 @@ pub fn render_sessions(f: &mut Frame, state: &mut AppState, theme: &Theme) {
                 Style::default().fg(theme.text_dim)
             };
 
+            let sparkline = state
+                .session_sparklines
+                .get(&s.id)
+                .map(|costs| render_sparkline(costs))
+                .unwrap_or_else(|| "\u{2581}\u{2581}\u{2581}\u{2581}\u{2581}\u{2581}\u{2581}".to_string());
+
             Row::new(vec![
                 format!("{}", i + 1),
                 truncate(&s.project, 14),
@@ -63,6 +86,7 @@ pub fn render_sessions(f: &mut Frame, state: &mut AppState, theme: &Theme) {
                 format_tokens(s.total_tokens),
                 format!("${:.2}", s.total_cost),
                 s.msg_count.to_string(),
+                sparkline,
                 format_relative_time(&s.updated_at),
             ])
             .style(style)
@@ -77,6 +101,7 @@ pub fn render_sessions(f: &mut Frame, state: &mut AppState, theme: &Theme) {
             Constraint::Length(14),
             Constraint::Length(10),
             Constraint::Length(10),
+            Constraint::Length(6),
             Constraint::Length(8),
             Constraint::Min(10),
         ],
@@ -92,6 +117,27 @@ pub fn render_sessions(f: &mut Frame, state: &mut AppState, theme: &Theme) {
     f.render_stateful_widget(table, area, &mut state.session_table_state);
 }
 
+fn render_sparkline(values: &[f64]) -> String {
+    const BARS: [char; 8] = ['\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}', '\u{2588}'];
+
+    if values.is_empty() {
+        return String::new();
+    }
+
+    let max = values.iter().cloned().fold(0.0f64, f64::max);
+    if max == 0.0 {
+        return BARS[0].to_string().repeat(values.len());
+    }
+
+    values
+        .iter()
+        .map(|v| {
+            let normalized = (v / max * 7.0).round() as usize;
+            BARS[normalized.min(7)]
+        })
+        .collect()
+}
+
 fn shorten_model(model: &str) -> String {
     model
         .replace("claude-", "")
@@ -101,7 +147,7 @@ fn shorten_model(model: &str) -> String {
 
 fn truncate(s: &str, max: usize) -> String {
     if s.len() > max {
-        format!("{}…", &s[..max - 1])
+        format!("{}\u{2026}", &s[..max - 1])
     } else {
         s.to_string()
     }

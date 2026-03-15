@@ -29,6 +29,7 @@ use data::aggregator::Aggregator;
 use data::db::Database;
 use data::scanner::scan_claude_projects;
 use data::watcher::{watch_directory, FsEvent};
+use ui::theme::THEME_NAMES;
 
 #[derive(Parser, Debug)]
 #[command(name = "aitop", about = "btop for AI — terminal dashboard for token usage and costs")]
@@ -70,7 +71,6 @@ fn main() -> Result<()> {
     let total_files = files.len();
     if total_files > 0 {
         for (i, file) in files.iter().enumerate() {
-            // Show startup progress (overwrite same line)
             eprint!(
                 "\r  Indexing sessions... ({}/{} files)",
                 i + 1,
@@ -82,17 +82,15 @@ fn main() -> Result<()> {
                 eprintln!("\nWarning: failed to ingest {:?}: {}", file.path, e);
             }
         }
-        // Clear the progress line
         eprint!("\r{}\r", " ".repeat(60));
         io::stderr().flush().ok();
     }
 
     if args.light {
-        drop(db); // Close write connection for light mode
+        drop(db);
         return print_light_mode(&db_path);
     }
 
-    // For TUI mode, keep write DB open and open a separate read connection
     run_tui(config, db, &db_path, &projects_dir)
 }
 
@@ -132,10 +130,7 @@ fn print_light_mode(db_path: &std::path::Path) -> Result<()> {
     println!("  {}", "\u{2500}".repeat(62));
     println!(
         "  {:<20} {:>10} {:>10} {:>10} {:>8}",
-        "Total",
-        "",
-        "",
-        "",
+        "Total", "", "", "",
         format!("${:.2}", total_cost)
     );
     println!();
@@ -155,17 +150,27 @@ fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let theme = ui::theme::get_theme(&config.theme);
+    let mut theme = ui::theme::get_theme(&config.theme);
     let mut state = AppState::new(config);
 
-    // Open a separate read-only connection for the aggregator (WAL mode allows concurrent access)
     let agg = Aggregator::open(db_path)?;
     state.refresh_data(&agg);
 
-    // Set up file watcher channel (std::sync::mpsc for non-async event loop)
-    let (watcher_tx, watcher_rx) = mpsc::channel::<String>();
+    // Delta banner: load last_checked_at and compute deltas
+    {
+        let meta_db = Database::open(db_path)?;
+        if let Ok(Some(last_ts)) = meta_db.get_last_checked_at() {
+            if let Ok(banner) = agg.delta_since(&last_ts) {
+                if banner.spend_delta > 0.0 || banner.new_sessions > 0 {
+                    state.banner_shown_at = Some(Instant::now());
+                    state.delta_banner = Some(banner);
+                }
+            }
+        }
+    }
 
-    // Start file watcher - convert from tokio mpsc to std mpsc via a bridge
+    // Set up file watcher
+    let (watcher_tx, watcher_rx) = mpsc::channel::<String>();
     let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::unbounded_channel::<FsEvent>();
     let _watcher = if projects_dir.exists() {
         match watch_directory(projects_dir, tokio_tx) {
@@ -176,10 +181,8 @@ fn run_tui(
         None
     };
 
-    // Bridge thread: reads from tokio channel, forwards to std channel
     let bridge_tx = watcher_tx;
     std::thread::spawn(move || {
-        // Use a blocking recv loop since tokio_rx.blocking_recv() works outside tokio runtime
         while let Some(event) = tokio_rx.blocking_recv() {
             match event {
                 FsEvent::Changed(path) => {
@@ -189,7 +192,16 @@ fn run_tui(
         }
     });
 
-    let result = run_event_loop(&mut terminal, &mut state, &write_db, &agg, &theme, &watcher_rx);
+    let result = run_event_loop(
+        &mut terminal, &mut state, &write_db, &agg, &mut theme, &watcher_rx,
+    );
+
+    // Save last_checked_at on quit
+    {
+        let meta_db = Database::open(db_path)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let _ = meta_db.set_last_checked_at(&now);
+    }
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -202,20 +214,21 @@ fn run_event_loop(
     state: &mut AppState,
     write_db: &Database,
     agg: &Aggregator,
-    theme: &ui::theme::Theme,
+    theme: &mut ui::theme::Theme,
     watcher_rx: &mpsc::Receiver<String>,
 ) -> Result<()> {
     let mut last_refresh = Instant::now();
-
-    // Maximum refresh interval (fallback): 30 seconds
     let max_refresh_interval = Duration::from_secs(30);
-    // Debounce: min 500ms between refreshes
     let debounce_interval = Duration::from_millis(500);
 
     loop {
+        let secs_since = last_refresh.elapsed().as_secs();
+        let secs_until = 30u64.saturating_sub(secs_since);
+
         terminal.draw(|f| {
-            let (tab_area, content_area) = ui::layout::main_layout(f.area());
+            let (tab_area, content_area, status_bar_area) = ui::layout::main_layout(f.area());
             state.content_area = content_area;
+            state.status_bar_area = status_bar_area;
 
             render_tab_bar(f, state, theme, tab_area);
 
@@ -226,8 +239,18 @@ fn run_event_loop(
                 View::Trends => ui::trends::render_trends(f, state, theme),
             }
 
+            render_status_bar(f, state, theme, status_bar_area, secs_until);
+
             if state.show_help {
                 ui::help::render_help(f, theme);
+            }
+
+            if state.detail_session.is_some() {
+                ui::session_detail::render_session_detail(f, state, theme);
+            }
+
+            if state.filter_active {
+                ui::filter::render_filter(f, state, theme);
             }
         })?;
 
@@ -235,43 +258,41 @@ fn run_event_loop(
             break;
         }
 
-        // Poll for keyboard events (short timeout for responsiveness)
+        state.check_banner_timeout();
+
         let timeout = Duration::from_millis(100);
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
-                handle_key(state, key);
+                if state.delta_banner.is_some() {
+                    state.dismiss_banner();
+                }
+                handle_key(state, key, theme, agg);
             }
         }
 
-        // Check for file watcher events (non-blocking)
+        // Check for file watcher events
         let mut got_fs_event = false;
         while let Ok(path) = watcher_rx.try_recv() {
-            // Ingest the changed file incrementally
             match write_db.ingest_file_by_path(&path) {
                 Ok((project, _offset)) => {
                     state.last_live_event = Some(Instant::now());
                     state.live_project = Some(project);
                     got_fs_event = true;
                 }
-                Err(_) => {
-                    // Silently ignore ingest errors from watcher events
-                }
+                Err(_) => {}
             }
         }
 
-        // Event-driven refresh: refresh immediately on file change (with debounce)
         if got_fs_event && last_refresh.elapsed() >= debounce_interval {
             state.refresh_data(agg);
             last_refresh = Instant::now();
         }
 
-        // Fallback: refresh every 30s even if no file changes
         if last_refresh.elapsed() >= max_refresh_interval {
             state.refresh_data(agg);
             last_refresh = Instant::now();
         }
 
-        // Manual refresh request (e.g. pressing 'r')
         if state.needs_refresh {
             state.refresh_data(agg);
             last_refresh = Instant::now();
@@ -281,12 +302,27 @@ fn run_event_loop(
     Ok(())
 }
 
-fn handle_key(state: &mut AppState, key: event::KeyEvent) {
+fn handle_key(
+    state: &mut AppState,
+    key: event::KeyEvent,
+    theme: &mut ui::theme::Theme,
+    agg: &Aggregator,
+) {
     if state.show_help {
         match key.code {
             KeyCode::Char('?') | KeyCode::Esc | KeyCode::F(1) => state.show_help = false,
             _ => {}
         }
+        return;
+    }
+
+    if state.filter_active {
+        handle_filter_key(state, key);
+        return;
+    }
+
+    if state.detail_session.is_some() {
+        handle_detail_key(state, key);
         return;
     }
 
@@ -296,7 +332,6 @@ fn handle_key(state: &mut AppState, key: event::KeyEvent) {
             state.should_quit = true;
         }
 
-        // View switching (always global -- d/s/m/t work from any view)
         KeyCode::Char('d') => state.view = View::Dashboard,
         KeyCode::Char('s') => state.view = View::Sessions,
         KeyCode::Char('m') => state.view = View::Models,
@@ -308,48 +343,98 @@ fn handle_key(state: &mut AppState, key: event::KeyEvent) {
 
         KeyCode::Char('?') | KeyCode::F(1) => state.show_help = true,
         KeyCode::Char('r') => state.needs_refresh = true,
+        KeyCode::Char('/') => {
+            state.filter_active = true;
+        }
 
-        // View-specific
+        KeyCode::Char('p') if state.view != View::Sessions => {
+            state.theme_index = (state.theme_index + 1) % THEME_NAMES.len();
+            *theme = ui::theme::get_theme(THEME_NAMES[state.theme_index]);
+        }
+
         _ => match state.view {
             View::Dashboard => handle_dashboard_key(state, key),
-            View::Sessions => handle_sessions_key(state, key),
+            View::Sessions => handle_sessions_key(state, key, agg),
             View::Models => handle_models_key(state, key),
             View::Trends => handle_trends_key(state, key),
         },
     }
 }
 
-fn handle_dashboard_key(_state: &mut AppState, _key: event::KeyEvent) {
-    // Dashboard-specific keys (future: panel focus cycling)
-}
+fn handle_dashboard_key(_state: &mut AppState, _key: event::KeyEvent) {}
 
-fn handle_sessions_key(state: &mut AppState, key: event::KeyEvent) {
+fn handle_sessions_key(state: &mut AppState, key: event::KeyEvent, agg: &Aggregator) {
     match key.code {
         KeyCode::Down | KeyCode::Char('j') => state.next_session(),
         KeyCode::Up | KeyCode::Char('k') => state.prev_session(),
-        KeyCode::Char('c') => {
-            state.session_sort = SessionSort::Cost;
-            state.sort_sessions();
+        KeyCode::Enter => {
+            if let Some(session_id) = state.selected_session_id() {
+                if let Ok(messages) = agg.session_detail(&session_id) {
+                    state.detail_messages = messages;
+                }
+                state.detail_session = Some(session_id);
+                state.detail_scroll = 0;
+            }
         }
-        KeyCode::Char('n') => {
-            state.session_sort = SessionSort::Tokens;
-            state.sort_sessions();
+        KeyCode::Char('c') => toggle_sort(state, SessionSort::Cost),
+        KeyCode::Char('n') => toggle_sort(state, SessionSort::Tokens),
+        KeyCode::Char('p') => toggle_sort(state, SessionSort::Project),
+        KeyCode::Char('u') => toggle_sort(state, SessionSort::Recent),
+        _ => {}
+    }
+}
+
+fn toggle_sort(state: &mut AppState, sort: SessionSort) {
+    if state.session_sort == sort {
+        state.sort_ascending = !state.sort_ascending;
+    } else {
+        state.session_sort = sort;
+        state.sort_ascending = false;
+    }
+    state.sort_sessions();
+}
+
+fn handle_detail_key(state: &mut AppState, key: event::KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            state.detail_session = None;
+            state.detail_messages.clear();
+            state.detail_scroll = 0;
         }
-        KeyCode::Char('p') => {
-            state.session_sort = SessionSort::Project;
-            state.sort_sessions();
+        KeyCode::Down | KeyCode::Char('j') => {
+            let max = state.detail_messages.len().saturating_sub(1);
+            state.detail_scroll = (state.detail_scroll + 1).min(max);
         }
-        KeyCode::Char('u') => {
-            state.session_sort = SessionSort::Recent;
-            state.sort_sessions();
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.detail_scroll = state.detail_scroll.saturating_sub(1);
         }
         _ => {}
     }
 }
 
-fn handle_models_key(_state: &mut AppState, _key: event::KeyEvent) {
-    // Models-specific keys (future: model detail drill-in)
+fn handle_filter_key(state: &mut AppState, key: event::KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            state.filter_active = false;
+        }
+        KeyCode::Enter => {
+            state.filter_active = false;
+            state.apply_filter();
+            state.session_table_state.select(Some(0));
+        }
+        KeyCode::Backspace => {
+            state.filter_text.pop();
+            state.apply_filter();
+        }
+        KeyCode::Char(c) => {
+            state.filter_text.push(c);
+            state.apply_filter();
+        }
+        _ => {}
+    }
 }
+
+fn handle_models_key(_state: &mut AppState, _key: event::KeyEvent) {}
 
 fn handle_trends_key(state: &mut AppState, key: event::KeyEvent) {
     match key.code {
@@ -358,7 +443,6 @@ fn handle_trends_key(state: &mut AppState, key: event::KeyEvent) {
             state.needs_refresh = true;
         }
         KeyCode::Char('o') => {
-            // mOnth (m is taken by global Models nav)
             state.trend_range = TrendRange::Month;
             state.needs_refresh = true;
         }
@@ -399,13 +483,9 @@ fn render_tab_bar(
         tab_label("T", "rends", state.view == View::Trends, theme),
     ];
 
-    // Build the live/idle indicator
     let (is_live, status_text) = state.live_status();
     let live_indicator = if is_live {
-        let project_label = state
-            .live_project
-            .as_deref()
-            .unwrap_or("");
+        let project_label = state.live_project.as_deref().unwrap_or("");
         if project_label.is_empty() {
             format!(" \u{25CF} {} ", status_text)
         } else {
@@ -416,9 +496,7 @@ fn render_tab_bar(
     };
 
     let live_style = if is_live {
-        Style::default()
-            .fg(theme.success)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(theme.success).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.muted)
     };
@@ -430,24 +508,60 @@ fn render_tab_bar(
                 .border_style(Style::default().fg(theme.muted))
                 .title(Span::styled(
                     " aitop ",
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
                 ))
                 .title(
-                    Line::from(Span::styled(live_indicator, live_style))
-                        .right_aligned(),
+                    Line::from(Span::styled(live_indicator, live_style)).right_aligned(),
                 ),
         )
         .select(state.view.index())
         .highlight_style(
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
         )
         .divider(Span::styled(" \u{2502} ", Style::default().fg(theme.muted)));
 
     f.render_widget(tabs, area);
+}
+
+fn render_status_bar(
+    f: &mut ratatui::Frame,
+    state: &AppState,
+    theme: &ui::theme::Theme,
+    area: Rect,
+    secs_until_refresh: u64,
+) {
+    let left_text = format!(
+        "aitop v0.1.0 \u{2502} {} sessions \u{2502} ${:.2} all-time",
+        state.dashboard.total_sessions, state.dashboard.spend_all_time
+    );
+
+    let hints = match state.view {
+        View::Dashboard => "d:dashboard  s:sessions  m:models  t:trends  ?:help  p:theme",
+        View::Sessions => "j/k:navigate  c:cost  n:tokens  p:project  u:updated  /:filter  ?:help",
+        View::Models => "d:dashboard  s:sessions  t:trends  p:theme  ?:help",
+        View::Trends => "w:week  o:month  a:all  \u{2190}\u{2192}:cycle  p:theme  ?:help",
+    };
+
+    let right_text = format!("{}  \u{27f3} {}s", hints, secs_until_refresh);
+
+    let available = area.width as usize;
+    let left_len = left_text.len();
+    let right_len = right_text.len();
+
+    let mut spans = vec![Span::styled(left_text, Style::default().fg(theme.text_dim))];
+
+    if left_len + right_len < available {
+        spans.push(Span::raw(" ".repeat(available - left_len - right_len)));
+    } else {
+        spans.push(Span::raw(" "));
+    }
+
+    spans.push(Span::styled(right_text, Style::default().fg(theme.muted)));
+
+    let bar = ratatui::widgets::Paragraph::new(Line::from(spans))
+        .style(Style::default().bg(ratatui::style::Color::Rgb(30, 30, 35)));
+
+    f.render_widget(bar, area);
 }
 
 fn tab_label<'a>(
@@ -467,9 +581,7 @@ fn tab_label<'a>(
     };
 
     let rest_style = if active {
-        Style::default()
-            .fg(theme.text)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.text_dim)
     };

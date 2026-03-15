@@ -52,6 +52,11 @@ impl Database {
                 last_offset INTEGER DEFAULT 0,
                 last_mtime  TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS metadata (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             ",
         )?;
         Ok(())
@@ -117,6 +122,28 @@ impl Database {
                 msg.cache_creation,
                 msg.cost_usd,
             ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_last_checked_at(&self) -> Result<Option<String>> {
+        let result = self.conn.query_row(
+            "SELECT value FROM metadata WHERE key = 'last_checked_at'",
+            [],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(val) => Ok(Some(val)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn set_last_checked_at(&self, ts: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO metadata (key, value) VALUES ('last_checked_at', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1",
+            params![ts],
         )?;
         Ok(())
     }

@@ -5,3 +5,6 @@ pub mod sessions;
 pub mod models;
 pub mod trends;
 pub mod help;
+pub mod widgets;
+pub mod filter;
+pub mod session_detail;

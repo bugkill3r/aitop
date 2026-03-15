@@ -13,11 +13,18 @@ pub fn render_trends(f: &mut Frame, state: &AppState, theme: &Theme) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(12), Constraint::Length(5)])
+        .constraints([
+            Constraint::Min(10),     // chart
+            Constraint::Length(5),   // stats
+            Constraint::Length(11),  // heatmap (7 days + 2 header + 2 borders)
+            Constraint::Length(11),  // contribution calendar
+        ])
         .split(area);
 
     render_chart(f, state, theme, chunks[0]);
     render_stats(f, state, theme, chunks[1]);
+    render_heatmap(f, state, theme, chunks[2]);
+    render_contribution_calendar(f, state, theme, chunks[3]);
 }
 
 fn render_chart(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::layout::Rect) {
@@ -112,6 +119,207 @@ fn render_chart(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::l
         );
 
     f.render_widget(chart, area);
+}
+
+fn render_heatmap(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::layout::Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.muted))
+        .title(Line::from(vec![
+            Span::styled(" Time-of-Day ", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled("Heatmap ", Style::default().fg(theme.text_dim)),
+        ]));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Collect all non-zero values for quartile computation
+    let mut all_vals: Vec<f64> = state.heatmap.iter()
+        .flat_map(|row| row.iter())
+        .copied()
+        .filter(|v| *v > 0.0)
+        .collect();
+    all_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let q1 = percentile(&all_vals, 25);
+    let q2 = percentile(&all_vals, 50);
+    let q3 = percentile(&all_vals, 75);
+
+    let mut lines = Vec::new();
+
+    // Header row: hours
+    let mut header_spans = vec![Span::styled("      ", Style::default().fg(theme.text_dim))];
+    for h in (0..24).step_by(2) {
+        header_spans.push(Span::styled(
+            format!("{:02} ", h),
+            Style::default().fg(theme.text_dim),
+        ));
+    }
+    lines.push(Line::from(header_spans));
+
+    // Data rows: one per day of week
+    // Reorder so Monday is first: indices 1,2,3,4,5,6,0
+    let day_order = [1usize, 2, 3, 4, 5, 6, 0];
+    let day_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+    for (i, &dow) in day_order.iter().enumerate() {
+        let mut spans = vec![Span::styled(
+            format!("  {} ", day_labels[i]),
+            Style::default().fg(theme.text_dim),
+        )];
+
+        for h in (0..24).step_by(2) {
+            // Average the two hours in each slot
+            let val = (state.heatmap[dow][h] + state.heatmap[dow][(h + 1).min(23)]) / 2.0;
+            let block_char = if val <= 0.0 {
+                "\u{2591}\u{2591}" // ░░
+            } else if val <= q1 {
+                "\u{2591}\u{2591}" // ░░
+            } else if val <= q2 {
+                "\u{2592}\u{2592}" // ▒▒
+            } else if val <= q3 {
+                "\u{2593}\u{2593}" // ▓▓
+            } else {
+                "\u{2588}\u{2588}" // ██
+            };
+
+            let color = if val <= 0.0 {
+                theme.bar_empty
+            } else if val <= q1 {
+                theme.muted
+            } else if val <= q2 {
+                theme.secondary
+            } else if val <= q3 {
+                theme.tertiary
+            } else {
+                theme.accent
+            };
+
+            spans.push(Span::styled(
+                format!("{} ", block_char),
+                Style::default().fg(color),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_contribution_calendar(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::layout::Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.muted))
+        .title(Line::from(vec![
+            Span::styled(" Contribution ", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled("Calendar (12 weeks) ", Style::default().fg(theme.text_dim)),
+        ]));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if state.contribution_calendar.is_empty() {
+        f.render_widget(
+            Paragraph::new("  No data yet").style(Style::default().fg(theme.text_dim)),
+            inner,
+        );
+        return;
+    }
+
+    // Build a grid: 7 rows (Mon-Sun) x 12 weeks
+    // We need to map dates to (week_col, day_row)
+    use chrono::Datelike;
+
+    let today = chrono::Local::now().date_naive();
+    let start = today - chrono::Duration::days(83); // 12 weeks = 84 days
+
+    // Build a lookup of date -> cost
+    let mut date_costs: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for day in &state.contribution_calendar {
+        date_costs.insert(day.date.clone(), day.cost);
+    }
+
+    // Build the grid: 7 rows x 12 cols
+    let mut grid = vec![vec![0.0f64; 12]; 7];
+    for d in 0..84 {
+        let date = start + chrono::Duration::days(d);
+        let date_str = date.format("%Y-%m-%d").to_string();
+        let cost = date_costs.get(&date_str).copied().unwrap_or(0.0);
+        let week = d as usize / 7;
+        let dow = date.weekday().num_days_from_monday() as usize; // 0=Mon
+        if week < 12 && dow < 7 {
+            grid[dow][week] = cost;
+        }
+    }
+
+    // Quartile computation for coloring
+    let mut all_vals: Vec<f64> = grid.iter()
+        .flat_map(|row| row.iter())
+        .copied()
+        .filter(|v| *v > 0.0)
+        .collect();
+    all_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let q1 = percentile(&all_vals, 25);
+    let q2 = percentile(&all_vals, 50);
+    let q3 = percentile(&all_vals, 75);
+
+    let day_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+    let mut lines = Vec::new();
+
+    // Week number header
+    let mut header_spans = vec![Span::styled("      ", Style::default().fg(theme.text_dim))];
+    for w in 0..12 {
+        let week_date = start + chrono::Duration::days((w * 7) as i64);
+        if w % 3 == 0 {
+            header_spans.push(Span::styled(
+                format!("{:<6}", week_date.format("%m/%d")),
+                Style::default().fg(theme.text_dim),
+            ));
+        } else {
+            header_spans.push(Span::styled("  ", Style::default().fg(theme.text_dim)));
+        }
+    }
+    lines.push(Line::from(header_spans));
+
+    for (dow, label) in day_labels.iter().enumerate() {
+        let mut spans = vec![Span::styled(
+            format!("  {} ", label),
+            Style::default().fg(theme.text_dim),
+        )];
+
+        for week in 0..12 {
+            let val = grid[dow][week];
+            let (ch, color) = if val <= 0.0 {
+                ("\u{2591}", theme.bar_empty)
+            } else if val <= q1 {
+                ("\u{2591}", theme.muted)
+            } else if val <= q2 {
+                ("\u{2592}", theme.secondary)
+            } else if val <= q3 {
+                ("\u{2593}", theme.tertiary)
+            } else {
+                ("\u{2588}", theme.accent)
+            };
+            spans.push(Span::styled(
+                format!("{} ", ch),
+                Style::default().fg(color),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Compute percentile from sorted values.
+fn percentile(sorted: &[f64], p: usize) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = (p as f64 / 100.0 * (sorted.len() as f64 - 1.0)).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
 }
 
 fn render_stats(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::layout::Rect) {

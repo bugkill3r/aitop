@@ -1,5 +1,7 @@
 use ratatui::style::Color;
 
+pub const THEME_NAMES: &[&str] = &["ember", "nord", "dracula", "gruvbox", "catppuccin", "mono"];
+
 #[derive(Debug, Clone)]
 pub struct Theme {
     pub name: &'static str,

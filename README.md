@@ -10,11 +10,16 @@ Like `btop` monitors your system resources, `aitop` monitors your AI spend. Buil
 - **4 views**: Dashboard, Sessions, Models, Trends — switch with `d`/`s`/`m`/`t`
 - **Zero auth required** — reads Claude Code's local JSONL session files directly
 - **SQLite-backed** — indexes once, instant startup after first run
+- **Live file watching** — detects new session data in real-time with fs watcher
 - **Burn rate tracking** — see your $/hr, daily spend, weekly totals at a glance
+- **Budget gauge** — visual progress bar with color thresholds when budget is configured
 - **Model breakdown** — cost, tokens, and cache hit ratio per model
-- **Session explorer** — sortable table of all sessions with drill-down
-- **Spend trends** — daily cost chart with projections and averages
-- **6 color themes** — ember (default), nord, dracula, gruvbox, catppuccin, mono
+- **Session explorer** — sortable table with inline sparklines, filter/search, and drill-down detail popup
+- **Delta banner** — shows cost/token changes since your last check
+- **Spend trends** — daily cost chart with projections, heatmap, and contribution calendar
+- **Project cost attribution** — cost breakdown by project
+- **Token efficiency score** — tokens per dollar, cache savings metrics
+- **6 color themes** — ember (default), nord, dracula, gruvbox, catppuccin, mono — cycle with `p`
 - **3MB single binary**, zero runtime dependencies, zero network calls
 
 ## Install
@@ -58,7 +63,13 @@ aitop --refresh 5
 | `t` | **T**rends view |
 | `1`-`4` | Quick switch views |
 | `j`/`k` or `↑`/`↓` | Navigate tables |
-| `c`/`n`/`p` | Sort by cost/tokens/project |
+| `Enter` | Open session detail popup |
+| `Esc` | Close popup / dismiss banner |
+| `/` | Filter sessions by project |
+| `c`/`n`/`o`/`u` | Sort by cost/tokens/project/recent |
+| `a` | Toggle sort ascending/descending |
+| `w`/`W`/`A` | Trend range: week/month/all |
+| `p` | Cycle color theme |
 | `r` | Force refresh |
 | `?` | Help overlay |
 | `q` | Quit |

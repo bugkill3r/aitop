@@ -4,6 +4,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use super::theme::Theme;
+use super::widgets::cost_color::cost_color;
 use crate::app::AppState;
 
 pub fn render_models(f: &mut Frame, state: &AppState, theme: &Theme) {
@@ -45,14 +46,17 @@ pub fn render_models(f: &mut Frame, state: &AppState, theme: &Theme) {
         };
 
         // Line 1: Model name + cost
+        let cost_width = inner.width as usize;
+        let name_len = short_name.len() + 2; // "  " prefix
+        let padding = cost_width.saturating_sub(name_len + 2);
         lines.push(Line::from(vec![
             Span::styled(
                 format!("  {}", short_name),
                 Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("{:>width$}", format!("${:.2}", model.cost), width = inner.width as usize - short_name.len() - 4),
-                Style::default().fg(theme.tertiary).add_modifier(Modifier::BOLD),
+                format!("{:>width$}", format!("${:.2}", model.cost), width = padding),
+                Style::default().fg(cost_color(model.cost)).add_modifier(Modifier::BOLD),
             ),
         ]));
 
