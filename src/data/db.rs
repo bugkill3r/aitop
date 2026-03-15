@@ -121,6 +121,35 @@ impl Database {
         Ok(())
     }
 
+    /// Ingest a JSONL file by its raw path string.
+    /// Derives session_id and project from the path structure.
+    /// Returns the project name (for live indicator) and new offset.
+    pub fn ingest_file_by_path(&self, path: &str) -> Result<(String, u64)> {
+        let file_path = std::path::PathBuf::from(path);
+        let session_id = file_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Derive project name from parent directory name
+        let project = file_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|dir_name| super::parser::decode_project_name(dir_name))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let sf = SessionFile {
+            path: file_path,
+            session_id,
+            project: project.clone(),
+        };
+
+        let offset = self.ingest_file(&sf)?;
+        Ok((project, offset))
+    }
+
     /// Ingest a JSONL file, starting from the given byte offset.
     pub fn ingest_file(&self, file: &SessionFile) -> Result<u64> {
         let path_str = file.path.to_string_lossy().to_string();

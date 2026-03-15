@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 
@@ -68,6 +70,10 @@ pub struct AppState {
     pub session_sort: SessionSort,
     pub trend_range: TrendRange,
 
+    // Live mode
+    pub last_live_event: Option<Instant>,
+    pub live_project: Option<String>,
+
     // Control
     pub should_quit: bool,
     pub needs_refresh: bool,
@@ -96,8 +102,19 @@ impl AppState {
             session_sort: SessionSort::Recent,
             trend_range: TrendRange::Month,
 
+            last_live_event: None,
+            live_project: None,
+
             should_quit: false,
             needs_refresh: true,
+        }
+    }
+
+    /// Returns the live/idle status text and whether it's "live" (true) or "idle" (false).
+    pub fn live_status(&self) -> (bool, &str) {
+        match self.last_live_event {
+            Some(t) if t.elapsed().as_secs() < 60 => (true, "LIVE"),
+            _ => (false, "IDLE"),
         }
     }
 

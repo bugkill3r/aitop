@@ -5,8 +5,9 @@ mod config;
 mod data;
 mod ui;
 
-use std::io;
-use std::time::Duration;
+use std::io::{self, Write as _};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
@@ -27,6 +28,7 @@ use config::Config;
 use data::aggregator::Aggregator;
 use data::db::Database;
 use data::scanner::scan_claude_projects;
+use data::watcher::{watch_directory, FsEvent};
 
 #[derive(Parser, Debug)]
 #[command(name = "aitop", about = "btop for AI — terminal dashboard for token usage and costs")]
@@ -59,25 +61,39 @@ fn main() -> Result<()> {
         config.refresh = refresh;
     }
 
-    // Ingest data
+    // Ingest data with startup progress
     let db_path = Config::db_path();
     let db = Database::open(&db_path)?;
     let projects_dir = config.claude_projects_dir();
     let files = scan_claude_projects(&projects_dir)?;
 
-    for file in &files {
-        if let Err(e) = db.ingest_file(file) {
-            eprintln!("Warning: failed to ingest {:?}: {}", file.path, e);
+    let total_files = files.len();
+    if total_files > 0 {
+        for (i, file) in files.iter().enumerate() {
+            // Show startup progress (overwrite same line)
+            eprint!(
+                "\r  Indexing sessions... ({}/{} files)",
+                i + 1,
+                total_files
+            );
+            io::stderr().flush().ok();
+
+            if let Err(e) = db.ingest_file(file) {
+                eprintln!("\nWarning: failed to ingest {:?}: {}", file.path, e);
+            }
         }
+        // Clear the progress line
+        eprint!("\r{}\r", " ".repeat(60));
+        io::stderr().flush().ok();
     }
 
-    drop(db); // Close write connection before opening read-only
-
     if args.light {
+        drop(db); // Close write connection for light mode
         return print_light_mode(&db_path);
     }
 
-    run_tui(config, &db_path)
+    // For TUI mode, keep write DB open and open a separate read connection
+    run_tui(config, db, &db_path, &projects_dir)
 }
 
 fn print_light_mode(db_path: &std::path::Path) -> Result<()> {
@@ -101,7 +117,7 @@ fn print_light_mode(db_path: &std::path::Path) -> Result<()> {
         "  {:<20} {:>10} {:>10} {:>10} {:>8}",
         "Model", "Input", "Output", "Calls", "Cost"
     );
-    println!("  {}", "─".repeat(62));
+    println!("  {}", "\u{2500}".repeat(62));
     for m in &models {
         println!(
             "  {:<20} {:>10} {:>10} {:>10} {:>8}",
@@ -113,7 +129,7 @@ fn print_light_mode(db_path: &std::path::Path) -> Result<()> {
         );
     }
     let total_cost: f64 = models.iter().map(|m| m.cost).sum();
-    println!("  {}", "─".repeat(62));
+    println!("  {}", "\u{2500}".repeat(62));
     println!(
         "  {:<20} {:>10} {:>10} {:>10} {:>8}",
         "Total",
@@ -127,7 +143,12 @@ fn print_light_mode(db_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn run_tui(config: Config, db_path: &std::path::Path) -> Result<()> {
+fn run_tui(
+    config: Config,
+    write_db: Database,
+    db_path: &std::path::Path,
+    projects_dir: &std::path::Path,
+) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -135,13 +156,40 @@ fn run_tui(config: Config, db_path: &std::path::Path) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let theme = ui::theme::get_theme(&config.theme);
-    let refresh_ms = (config.refresh * 1000.0) as u64;
     let mut state = AppState::new(config);
 
+    // Open a separate read-only connection for the aggregator (WAL mode allows concurrent access)
     let agg = Aggregator::open(db_path)?;
     state.refresh_data(&agg);
 
-    let result = run_event_loop(&mut terminal, &mut state, &agg, &theme, refresh_ms);
+    // Set up file watcher channel (std::sync::mpsc for non-async event loop)
+    let (watcher_tx, watcher_rx) = mpsc::channel::<String>();
+
+    // Start file watcher - convert from tokio mpsc to std mpsc via a bridge
+    let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::unbounded_channel::<FsEvent>();
+    let _watcher = if projects_dir.exists() {
+        match watch_directory(projects_dir, tokio_tx) {
+            Ok(w) => Some(w),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    // Bridge thread: reads from tokio channel, forwards to std channel
+    let bridge_tx = watcher_tx;
+    std::thread::spawn(move || {
+        // Use a blocking recv loop since tokio_rx.blocking_recv() works outside tokio runtime
+        while let Some(event) = tokio_rx.blocking_recv() {
+            match event {
+                FsEvent::Changed(path) => {
+                    let _ = bridge_tx.send(path);
+                }
+            }
+        }
+    });
+
+    let result = run_event_loop(&mut terminal, &mut state, &write_db, &agg, &theme, &watcher_rx);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -152,11 +200,17 @@ fn run_tui(config: Config, db_path: &std::path::Path) -> Result<()> {
 fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
+    write_db: &Database,
     agg: &Aggregator,
     theme: &ui::theme::Theme,
-    refresh_ms: u64,
+    watcher_rx: &mpsc::Receiver<String>,
 ) -> Result<()> {
-    let mut last_refresh = std::time::Instant::now();
+    let mut last_refresh = Instant::now();
+
+    // Maximum refresh interval (fallback): 30 seconds
+    let max_refresh_interval = Duration::from_secs(30);
+    // Debounce: min 500ms between refreshes
+    let debounce_interval = Duration::from_millis(500);
 
     loop {
         terminal.draw(|f| {
@@ -181,20 +235,46 @@ fn run_event_loop(
             break;
         }
 
-        let timeout = Duration::from_millis(refresh_ms.min(100));
+        // Poll for keyboard events (short timeout for responsiveness)
+        let timeout = Duration::from_millis(100);
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 handle_key(state, key);
             }
         }
 
-        if last_refresh.elapsed() >= Duration::from_millis(refresh_ms) {
-            state.refresh_data(agg);
-            last_refresh = std::time::Instant::now();
+        // Check for file watcher events (non-blocking)
+        let mut got_fs_event = false;
+        while let Ok(path) = watcher_rx.try_recv() {
+            // Ingest the changed file incrementally
+            match write_db.ingest_file_by_path(&path) {
+                Ok((project, _offset)) => {
+                    state.last_live_event = Some(Instant::now());
+                    state.live_project = Some(project);
+                    got_fs_event = true;
+                }
+                Err(_) => {
+                    // Silently ignore ingest errors from watcher events
+                }
+            }
         }
 
+        // Event-driven refresh: refresh immediately on file change (with debounce)
+        if got_fs_event && last_refresh.elapsed() >= debounce_interval {
+            state.refresh_data(agg);
+            last_refresh = Instant::now();
+        }
+
+        // Fallback: refresh every 30s even if no file changes
+        if last_refresh.elapsed() >= max_refresh_interval {
+            state.refresh_data(agg);
+            last_refresh = Instant::now();
+        }
+
+        // Manual refresh request (e.g. pressing 'r')
         if state.needs_refresh {
             state.refresh_data(agg);
+            last_refresh = Instant::now();
         }
     }
 
@@ -216,7 +296,7 @@ fn handle_key(state: &mut AppState, key: event::KeyEvent) {
             state.should_quit = true;
         }
 
-        // View switching (always global — d/s/m/t work from any view)
+        // View switching (always global -- d/s/m/t work from any view)
         KeyCode::Char('d') => state.view = View::Dashboard,
         KeyCode::Char('s') => state.view = View::Sessions,
         KeyCode::Char('m') => state.view = View::Models,
@@ -287,7 +367,6 @@ fn handle_trends_key(state: &mut AppState, key: event::KeyEvent) {
             state.needs_refresh = true;
         }
         KeyCode::Left => {
-            // Cycle: Week → Month → All
             state.trend_range = match state.trend_range {
                 TrendRange::Month => TrendRange::Week,
                 TrendRange::All => TrendRange::Month,
@@ -320,6 +399,30 @@ fn render_tab_bar(
         tab_label("T", "rends", state.view == View::Trends, theme),
     ];
 
+    // Build the live/idle indicator
+    let (is_live, status_text) = state.live_status();
+    let live_indicator = if is_live {
+        let project_label = state
+            .live_project
+            .as_deref()
+            .unwrap_or("");
+        if project_label.is_empty() {
+            format!(" \u{25CF} {} ", status_text)
+        } else {
+            format!(" \u{25CF} {} {} ", status_text, project_label)
+        }
+    } else {
+        format!(" \u{25CB} {} ", status_text)
+    };
+
+    let live_style = if is_live {
+        Style::default()
+            .fg(theme.success)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.muted)
+    };
+
     let tabs = Tabs::new(tab_titles)
         .block(
             Block::default()
@@ -330,7 +433,11 @@ fn render_tab_bar(
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
-                )),
+                ))
+                .title(
+                    Line::from(Span::styled(live_indicator, live_style))
+                        .right_aligned(),
+                ),
         )
         .select(state.view.index())
         .highlight_style(
@@ -338,7 +445,7 @@ fn render_tab_bar(
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )
-        .divider(Span::styled(" │ ", Style::default().fg(theme.muted)));
+        .divider(Span::styled(" \u{2502} ", Style::default().fg(theme.muted)));
 
     f.render_widget(tabs, area);
 }
