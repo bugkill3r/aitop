@@ -216,12 +216,15 @@ fn handle_key(state: &mut AppState, key: event::KeyEvent) {
             state.should_quit = true;
         }
 
-        // View switching (global)
+        // View switching (always global — d/s/m/t work from any view)
+        KeyCode::Char('d') => state.view = View::Dashboard,
+        KeyCode::Char('s') => state.view = View::Sessions,
+        KeyCode::Char('m') => state.view = View::Models,
+        KeyCode::Char('t') => state.view = View::Trends,
         KeyCode::Char('1') => state.view = View::Dashboard,
         KeyCode::Char('2') => state.view = View::Sessions,
         KeyCode::Char('3') => state.view = View::Models,
         KeyCode::Char('4') => state.view = View::Trends,
-        KeyCode::Char('s') => state.view = View::Sessions,
 
         KeyCode::Char('?') | KeyCode::F(1) => state.show_help = true,
         KeyCode::Char('r') => state.needs_refresh = true,
@@ -236,13 +239,8 @@ fn handle_key(state: &mut AppState, key: event::KeyEvent) {
     }
 }
 
-fn handle_dashboard_key(state: &mut AppState, key: event::KeyEvent) {
-    match key.code {
-        KeyCode::Char('d') => {} // already on dashboard
-        KeyCode::Char('m') => state.view = View::Models,
-        KeyCode::Char('t') => state.view = View::Trends,
-        _ => {}
-    }
+fn handle_dashboard_key(_state: &mut AppState, _key: event::KeyEvent) {
+    // Dashboard-specific keys (future: panel focus cycling)
 }
 
 fn handle_sessions_key(state: &mut AppState, key: event::KeyEvent) {
@@ -261,23 +259,16 @@ fn handle_sessions_key(state: &mut AppState, key: event::KeyEvent) {
             state.session_sort = SessionSort::Project;
             state.sort_sessions();
         }
-        KeyCode::Char('d') => {
+        KeyCode::Char('u') => {
             state.session_sort = SessionSort::Recent;
             state.sort_sessions();
         }
-        KeyCode::Char('m') => state.view = View::Models,
-        KeyCode::Char('t') => state.view = View::Trends,
         _ => {}
     }
 }
 
-fn handle_models_key(state: &mut AppState, key: event::KeyEvent) {
-    match key.code {
-        KeyCode::Char('d') => state.view = View::Dashboard,
-        KeyCode::Char('m') => {} // already on models
-        KeyCode::Char('t') => state.view = View::Trends,
-        _ => {}
-    }
+fn handle_models_key(_state: &mut AppState, _key: event::KeyEvent) {
+    // Models-specific keys (future: model detail drill-in)
 }
 
 fn handle_trends_key(state: &mut AppState, key: event::KeyEvent) {
@@ -286,7 +277,8 @@ fn handle_trends_key(state: &mut AppState, key: event::KeyEvent) {
             state.trend_range = TrendRange::Week;
             state.needs_refresh = true;
         }
-        KeyCode::Char('m') => {
+        KeyCode::Char('o') => {
+            // mOnth (m is taken by global Models nav)
             state.trend_range = TrendRange::Month;
             state.needs_refresh = true;
         }
@@ -294,8 +286,23 @@ fn handle_trends_key(state: &mut AppState, key: event::KeyEvent) {
             state.trend_range = TrendRange::All;
             state.needs_refresh = true;
         }
-        KeyCode::Char('d') => state.view = View::Dashboard,
-        KeyCode::Char('t') => {} // already on trends
+        KeyCode::Left => {
+            // Cycle: Week → Month → All
+            state.trend_range = match state.trend_range {
+                TrendRange::Month => TrendRange::Week,
+                TrendRange::All => TrendRange::Month,
+                TrendRange::Week => TrendRange::Week,
+            };
+            state.needs_refresh = true;
+        }
+        KeyCode::Right => {
+            state.trend_range = match state.trend_range {
+                TrendRange::Week => TrendRange::Month,
+                TrendRange::Month => TrendRange::All,
+                TrendRange::All => TrendRange::All,
+            };
+            state.needs_refresh = true;
+        }
         _ => {}
     }
 }

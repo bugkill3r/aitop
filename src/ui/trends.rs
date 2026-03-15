@@ -38,9 +38,12 @@ fn render_chart(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::l
             Span::styled("w", Style::default().fg(theme.tertiary).add_modifier(Modifier::UNDERLINED)),
             Span::styled("eek ", Style::default().fg(theme.text_dim)),
             Span::styled("m", Style::default().fg(theme.tertiary).add_modifier(Modifier::UNDERLINED)),
-            Span::styled("onth ", Style::default().fg(theme.text_dim)),
+            Span::styled("o", Style::default().fg(theme.tertiary).add_modifier(Modifier::UNDERLINED)),
+            Span::styled("nth ", Style::default().fg(theme.text_dim)),
             Span::styled("a", Style::default().fg(theme.tertiary).add_modifier(Modifier::UNDERLINED)),
             Span::styled("ll ", Style::default().fg(theme.text_dim)),
+            Span::styled("←→", Style::default().fg(theme.tertiary)),
+            Span::styled(" cycle ", Style::default().fg(theme.text_dim)),
         ]));
 
     if state.daily_spend.is_empty() {

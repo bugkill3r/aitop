@@ -26,6 +26,8 @@ pub fn render_sessions(f: &mut Frame, state: &mut AppState, theme: &Theme) {
             Span::styled("tokens ", Style::default().fg(theme.text_dim)),
             Span::styled("p", Style::default().fg(theme.tertiary).add_modifier(Modifier::UNDERLINED)),
             Span::styled("roject ", Style::default().fg(theme.text_dim)),
+            Span::styled("u", Style::default().fg(theme.tertiary).add_modifier(Modifier::UNDERLINED)),
+            Span::styled("pdated ", Style::default().fg(theme.text_dim)),
         ]));
 
     let header = Row::new(vec![
