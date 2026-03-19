@@ -15,6 +15,7 @@ pub struct ParsedMessage {
     pub cache_creation: i64,
     pub cost_usd: f64,
     pub project: String,
+    pub provider: String,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +26,7 @@ pub struct ParsedSession {
     pub updated_at: String,
     pub model: Option<String>,
     pub version: Option<String>,
+    pub provider: String,
 }
 
 // Raw JSONL structures for deserialization
@@ -63,7 +65,9 @@ struct RawUsage {
 
 #[derive(Debug, Deserialize)]
 struct CacheCreation {
+    #[allow(dead_code)]
     ephemeral_1h_input_tokens: Option<i64>,
+    #[allow(dead_code)]
     ephemeral_5m_input_tokens: Option<i64>,
 }
 
@@ -90,6 +94,7 @@ pub fn parse_jsonl_line(
                     updated_at: timestamp.clone(),
                     model: None,
                     version: entry.version,
+                    provider: "claude".to_string(),
                 };
                 let msg = ParsedMessage {
                     uuid,
@@ -103,6 +108,7 @@ pub fn parse_jsonl_line(
                     cache_creation: 0,
                     cost_usd: 0.0,
                     project: project.to_string(),
+                    provider: "claude".to_string(),
                 };
                 Some((Some(session), Some(msg)))
             } else {
@@ -118,6 +124,7 @@ pub fn parse_jsonl_line(
                     cache_creation: 0,
                     cost_usd: 0.0,
                     project: project.to_string(),
+                    provider: "claude".to_string(),
                 };
                 Some((None, Some(msg)))
             }
@@ -146,6 +153,7 @@ pub fn parse_jsonl_line(
                 cache_creation,
                 cost_usd: cost,
                 project: project.to_string(),
+                provider: "claude".to_string(),
             };
             Some((None, Some(msg)))
         }
@@ -156,7 +164,7 @@ pub fn parse_jsonl_line(
 }
 
 /// Decode project directory name to human-readable project name.
-/// e.g., "-Users-saurabh-Dev-echopad" → "echopad"
+/// e.g., "-Users-saurabh-Dev-echopad" -> "echopad"
 pub fn decode_project_name(dir_name: &str) -> String {
     // URL-decode then take the last path component
     let decoded = urlencoding::decode(dir_name).unwrap_or_else(|_| dir_name.into());
@@ -190,6 +198,7 @@ mod tests {
         let session = session.unwrap();
         assert_eq!(session.id, "s1");
         assert_eq!(session.project, "testproject");
+        assert_eq!(session.provider, "claude");
     }
 
     #[test]
@@ -206,6 +215,7 @@ mod tests {
         assert_eq!(msg.output_tokens, 500);
         assert_eq!(msg.cache_read, 200);
         assert!(msg.cost_usd > 0.0);
+        assert_eq!(msg.provider, "claude");
     }
 
     #[test]
@@ -224,5 +234,22 @@ mod tests {
         let (session, msg) = result.unwrap();
         assert!(session.is_none()); // Not the first message, so no session
         assert!(msg.is_some());
+    }
+
+    #[test]
+    fn test_parsed_message_default_provider() {
+        let pricing = PricingRegistry::builtin();
+        // User message
+        let line = r#"{"uuid":"u1","sessionId":"s1","type":"user","timestamp":"2025-01-15T10:00:00Z","parentUuid":null,"message":{"role":"user"}}"#;
+        let result = parse_jsonl_line(line, "testproject", &pricing).unwrap();
+        let (session, msg) = result;
+        assert_eq!(session.unwrap().provider, "claude");
+        assert_eq!(msg.unwrap().provider, "claude");
+
+        // Assistant message
+        let line = r#"{"uuid":"u2","sessionId":"s1","type":"assistant","timestamp":"2025-01-15T10:00:01Z","message":{"model":"claude-sonnet-4-6-20250514","role":"assistant","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+        let result = parse_jsonl_line(line, "testproject", &pricing).unwrap();
+        let (_, msg) = result;
+        assert_eq!(msg.unwrap().provider, "claude");
     }
 }

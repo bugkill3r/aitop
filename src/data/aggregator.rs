@@ -29,6 +29,7 @@ pub struct ModelStats {
     pub cache_read: i64,
     pub cache_creation: i64,
     pub call_count: i64,
+    pub provider: String,
 }
 
 /// Session summary for the sessions list.
@@ -42,6 +43,7 @@ pub struct SessionSummary {
     pub msg_count: i64,
     pub started_at: String,
     pub updated_at: String,
+    pub provider: String,
 }
 
 /// Daily spend data point.
@@ -70,6 +72,7 @@ pub struct ActivityEntry {
     pub output_tokens: i64,
     pub cache_read: i64,
     pub cost_usd: f64,
+    pub provider: String,
 }
 
 /// Individual message within a session (for detail popup).
@@ -198,7 +201,8 @@ impl Aggregator {
     pub fn model_breakdown(&self) -> Result<Vec<ModelStats>> {
         let mut stmt = self.conn.prepare(
             "SELECT COALESCE(model, 'unknown'), SUM(cost_usd), SUM(input_tokens),
-                    SUM(output_tokens), SUM(cache_read), SUM(cache_creation), COUNT(*)
+                    SUM(output_tokens), SUM(cache_read), SUM(cache_creation), COUNT(*),
+                    COALESCE(provider, 'claude')
              FROM messages
              WHERE model IS NOT NULL AND model != ''
              GROUP BY model
@@ -214,6 +218,7 @@ impl Aggregator {
                 cache_read: row.get(4)?,
                 cache_creation: row.get(5)?,
                 call_count: row.get(6)?,
+                provider: row.get(7)?,
             })
         })?;
 
@@ -225,7 +230,8 @@ impl Aggregator {
             "SELECT s.id, s.project, COALESCE(s.model, 'unknown'), s.started_at, s.updated_at,
                     COALESCE(SUM(m.cost_usd), 0),
                     COALESCE(SUM(m.input_tokens + m.output_tokens), 0),
-                    COUNT(m.id)
+                    COUNT(m.id),
+                    COALESCE(s.provider, 'claude')
              FROM sessions s
              LEFT JOIN messages m ON s.id = m.session_id
              GROUP BY s.id
@@ -243,6 +249,7 @@ impl Aggregator {
                 total_cost: row.get(5)?,
                 total_tokens: row.get(6)?,
                 msg_count: row.get(7)?,
+                provider: row.get(8)?,
             })
         })?;
 
@@ -295,7 +302,8 @@ impl Aggregator {
     pub fn recent_activity(&self, limit: usize) -> Result<Vec<ActivityEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT m.timestamp, s.project, COALESCE(m.model, 'unknown'),
-                    m.input_tokens, m.output_tokens, m.cache_read, m.cost_usd
+                    m.input_tokens, m.output_tokens, m.cache_read, m.cost_usd,
+                    COALESCE(m.provider, 'claude')
              FROM messages m
              JOIN sessions s ON m.session_id = s.id
              WHERE m.type = 'assistant' AND m.model IS NOT NULL
@@ -312,6 +320,7 @@ impl Aggregator {
                 output_tokens: row.get(4)?,
                 cache_read: row.get(5)?,
                 cost_usd: row.get(6)?,
+                provider: row.get(7)?,
             })
         })?;
 
@@ -370,7 +379,6 @@ impl Aggregator {
         let total_current: f64 = current_models.iter().map(|(_, c)| c).sum();
 
         // Get total cost from previous equivalent period for comparison
-        // We approximate: if since_ts was 2h ago, compare with the 2h before that
         let total_previous: f64 = self.conn.query_row(
             "SELECT COALESCE(SUM(cost_usd), 0) FROM messages
              WHERE timestamp <= ?1
@@ -649,3 +657,5 @@ fn format_since_label(iso: &str) -> String {
         format!("{}w ago", diff.num_days() / 7)
     }
 }
+
+
