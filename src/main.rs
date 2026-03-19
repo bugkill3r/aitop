@@ -20,7 +20,10 @@ use aitop::app::{AppState, SessionSort, TrendRange, View};
 use aitop::config::Config;
 use aitop::data::aggregator::Aggregator;
 use aitop::data::db::Database;
+use aitop::data::gemini::scan_gemini_sessions;
+use aitop::data::openclaw::scan_openclaw_sessions;
 use aitop::data::pricing::PricingRegistry;
+use aitop::data::provider::Provider;
 use aitop::data::scanner::scan_projects;
 use aitop::data::watcher::{watch_directory, FsEvent};
 use aitop::ui;
@@ -69,20 +72,43 @@ fn main() -> Result<()> {
     let db_path = Config::db_path();
     let db = Database::open_with_pricing(&db_path, pricing.clone())?;
     let projects_dir = config.projects_dir();
-    let files = scan_projects(&projects_dir)?;
 
-    let total_files = files.len();
+    // Scan Claude sessions
+    let claude_files = scan_projects(&projects_dir)?;
+
+    // Scan Gemini sessions
+    let gemini_dir = Provider::Gemini.default_dir();
+    let gemini_files = scan_gemini_sessions(&gemini_dir).unwrap_or_default();
+
+    // Scan OpenClaw sessions
+    let openclaw_dir = Provider::OpenClaw.default_dir();
+    let openclaw_files = scan_openclaw_sessions(&openclaw_dir).unwrap_or_default();
+
+    let total_files = claude_files.len() + gemini_files.len() + openclaw_files.len();
     if total_files > 0 {
-        for (i, file) in files.iter().enumerate() {
-            eprint!(
-                "\r  Indexing sessions... ({}/{} files)",
-                i + 1,
-                total_files
-            );
+        let mut count = 0;
+        for file in &claude_files {
+            count += 1;
+            eprint!("\r  Indexing sessions... ({}/{} files)", count, total_files);
             io::stderr().flush().ok();
-
             if let Err(e) = db.ingest_file(file) {
                 eprintln!("\nWarning: failed to ingest {:?}: {}", file.path, e);
+            }
+        }
+        for file in &gemini_files {
+            count += 1;
+            eprint!("\r  Indexing sessions... ({}/{} files)", count, total_files);
+            io::stderr().flush().ok();
+            if let Err(e) = db.ingest_gemini_file(file) {
+                eprintln!("\nWarning: failed to ingest Gemini {:?}: {}", file.path, e);
+            }
+        }
+        for file in &openclaw_files {
+            count += 1;
+            eprint!("\r  Indexing sessions... ({}/{} files)", count, total_files);
+            io::stderr().flush().ok();
+            if let Err(e) = db.ingest_openclaw_file(file) {
+                eprintln!("\nWarning: failed to ingest OpenClaw {:?}: {}", file.path, e);
             }
         }
         eprint!("\r{}\r", " ".repeat(60));
@@ -173,14 +199,32 @@ fn run_tui(
         }
     }
 
-    // Set up file watcher
+    // Set up file watchers for all providers
     let (watcher_tx, watcher_rx) = mpsc::channel::<String>();
     let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::unbounded_channel::<FsEvent>();
-    let _watcher = if projects_dir.exists() {
-        watch_directory(projects_dir, tokio_tx).ok()
-    } else {
-        None
-    };
+
+    let mut _watchers: Vec<notify::RecommendedWatcher> = Vec::new();
+
+    // Watch Claude projects dir
+    if projects_dir.exists() {
+        if let Ok(w) = watch_directory(projects_dir, tokio_tx.clone()) {
+            _watchers.push(w);
+        }
+    }
+    // Watch Gemini dir
+    let gemini_dir = Provider::Gemini.default_dir();
+    if gemini_dir.exists() {
+        if let Ok(w) = watch_directory(&gemini_dir, tokio_tx.clone()) {
+            _watchers.push(w);
+        }
+    }
+    // Watch OpenClaw dir
+    let openclaw_dir = Provider::OpenClaw.default_dir();
+    if openclaw_dir.exists() {
+        if let Ok(w) = watch_directory(&openclaw_dir, tokio_tx) {
+            _watchers.push(w);
+        }
+    }
 
     let bridge_tx = watcher_tx;
     std::thread::spawn(move || {
@@ -274,7 +318,41 @@ fn run_event_loop(
         // Check for file watcher events
         let mut got_fs_event = false;
         while let Ok(path) = watcher_rx.try_recv() {
-            if let Ok((project, _offset)) = write_db.ingest_file_by_path(&path) {
+            let result = if path.contains("/.gemini/") {
+                // Gemini session file — derive project from path
+                let file_path = std::path::PathBuf::from(&path);
+                let project = file_path
+                    .ancestors()
+                    .find(|p| p.parent().map(|pp| pp.file_name().and_then(|n| n.to_str()) == Some("tmp")).unwrap_or(false))
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("gemini")
+                    .to_string();
+                let sf = aitop::data::scanner::SessionFile {
+                    path: file_path.clone(),
+                    session_id: file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string(),
+                    project: project.clone(),
+                };
+                write_db.ingest_gemini_file(&sf).map(|_| (project, 0u64))
+            } else if path.contains("/.openclaw/") {
+                let file_path = std::path::PathBuf::from(&path);
+                let project = file_path
+                    .ancestors()
+                    .find(|p| p.parent().map(|pp| pp.file_name().and_then(|n| n.to_str()) == Some("agents")).unwrap_or(false))
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("openclaw")
+                    .to_string();
+                let sf = aitop::data::scanner::SessionFile {
+                    path: file_path.clone(),
+                    session_id: file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string(),
+                    project: project.clone(),
+                };
+                write_db.ingest_openclaw_file(&sf).map(|_| (project, 0u64))
+            } else {
+                write_db.ingest_file_by_path(&path)
+            };
+            if let Ok((project, _offset)) = result {
                 state.last_live_event = Some(Instant::now());
                 state.live_project = Some(project);
                 got_fs_event = true;

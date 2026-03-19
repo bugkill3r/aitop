@@ -11,7 +11,8 @@ pub fn format_tokens(n: i64) -> String {
     }
 }
 
-/// Shorten a model name by removing the "claude-" prefix and date suffixes.
+/// Shorten a model name for display.
+/// Strips "claude-" prefix, date suffixes (-20250514), and "-preview" suffix.
 pub fn shorten_model(model: &str) -> String {
     let mut s = model.replace("claude-", "");
     // Strip date suffixes like -20250514 (dash followed by exactly 8 digits)
@@ -20,6 +21,10 @@ pub fn shorten_model(model: &str) -> String {
         if suffix.starts_with('-') && suffix[1..].chars().all(|c| c.is_ascii_digit()) {
             s = s[..s.len() - 9].to_string();
         }
+    }
+    // Strip "-preview" suffix (common in Gemini model names)
+    if let Some(stripped) = s.strip_suffix("-preview") {
+        s = stripped.to_string();
     }
     s
 }
@@ -99,6 +104,12 @@ mod tests {
     #[test]
     fn test_shorten_model_unknown() {
         assert_eq!(shorten_model("gpt-4o"), "gpt-4o");
+    }
+
+    #[test]
+    fn test_shorten_model_gemini() {
+        assert_eq!(shorten_model("gemini-3-pro-preview"), "gemini-3-pro");
+        assert_eq!(shorten_model("gemini-2.5-flash"), "gemini-2.5-flash");
     }
 
     #[test]

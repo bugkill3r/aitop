@@ -295,4 +295,91 @@ impl Database {
         tx.commit()?;
         Ok(new_offset)
     }
+
+    /// Ingest pre-parsed session and messages (used by Gemini/OpenClaw parsers).
+    /// Uses file mtime to skip files that haven't changed since last ingest.
+    pub fn ingest_parsed(
+        &self,
+        path: &std::path::Path,
+        session: Option<&ParsedSession>,
+        messages: &[ParsedMessage],
+    ) -> Result<()> {
+        let path_str = path.to_string_lossy().to_string();
+
+        // Check mtime to skip unchanged files
+        let mtime = std::fs::metadata(path)?
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .to_string();
+
+        let last_mtime = self.conn.query_row(
+            "SELECT last_mtime FROM file_index WHERE path = ?1",
+            params![path_str],
+            |row| row.get::<_, String>(0),
+        );
+        if let Ok(ref saved_mtime) = last_mtime {
+            if saved_mtime == &mtime {
+                return Ok(()); // File hasn't changed
+            }
+        }
+
+        let tx = self.conn.unchecked_transaction()?;
+
+        if let Some(s) = session {
+            tx.execute(
+                "INSERT INTO sessions (id, project, started_at, updated_at, model, version, provider)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(id) DO UPDATE SET
+                    updated_at = MAX(sessions.updated_at, ?4),
+                    model = COALESCE(?5, sessions.model),
+                    version = COALESCE(?6, sessions.version)",
+                params![s.id, s.project, s.started_at, s.updated_at, s.model, s.version, s.provider],
+            )?;
+        }
+
+        for m in messages {
+            if let Some(ref model) = m.model {
+                tx.execute(
+                    "UPDATE sessions SET model = ?1, updated_at = MAX(updated_at, ?2) WHERE id = ?3",
+                    params![model, m.timestamp, m.session_id],
+                )?;
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd, m.provider],
+            )?;
+        }
+
+        tx.execute(
+            "INSERT INTO file_index (path, last_offset, last_mtime) VALUES (?1, 0, ?2)
+             ON CONFLICT(path) DO UPDATE SET last_mtime = ?2",
+            params![path_str, mtime],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Ingest a Gemini session JSON file.
+    pub fn ingest_gemini_file(&self, file: &SessionFile) -> Result<()> {
+        let (session, messages) = super::gemini::parse_gemini_session(
+            &file.path,
+            &file.project,
+            &self.pricing,
+        )?;
+        self.ingest_parsed(&file.path, Some(&session), &messages)
+    }
+
+    /// Ingest an OpenClaw JSONL session file.
+    pub fn ingest_openclaw_file(&self, file: &SessionFile) -> Result<()> {
+        let (session, messages) = super::openclaw::parse_openclaw_file(
+            &file.path,
+            &file.project,
+            &self.pricing,
+        )?;
+        self.ingest_parsed(&file.path, session.as_ref(), &messages)
+    }
 }

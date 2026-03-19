@@ -5,7 +5,6 @@ use std::path::PathBuf;
 pub enum Provider {
     Claude,
     Gemini,
-    Codex,
     OpenClaw,
 }
 
@@ -14,7 +13,6 @@ impl fmt::Display for Provider {
         match self {
             Provider::Claude => write!(f, "claude"),
             Provider::Gemini => write!(f, "gemini"),
-            Provider::Codex => write!(f, "codex"),
             Provider::OpenClaw => write!(f, "openclaw"),
         }
     }
@@ -26,10 +24,14 @@ impl Provider {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         match self {
             Provider::Claude => home.join(".claude").join("projects"),
-            Provider::Gemini => home.join(".gemini").join("projects"),
-            Provider::Codex => home.join(".codex").join("projects"),
-            Provider::OpenClaw => home.join(".openclaw").join("projects"),
+            Provider::Gemini => home.join(".gemini").join("tmp"),
+            Provider::OpenClaw => home.join(".openclaw").join("agents"),
         }
+    }
+
+    /// All providers that aitop can scan.
+    pub fn all() -> &'static [Provider] {
+        &[Provider::Claude, Provider::Gemini, Provider::OpenClaw]
     }
 }
 
@@ -49,7 +51,6 @@ mod tests {
     fn test_provider_display() {
         assert_eq!(Provider::Claude.to_string(), "claude");
         assert_eq!(Provider::Gemini.to_string(), "gemini");
-        assert_eq!(Provider::Codex.to_string(), "codex");
         assert_eq!(Provider::OpenClaw.to_string(), "openclaw");
     }
 
@@ -60,15 +61,20 @@ mod tests {
             || claude_dir.to_string_lossy().ends_with(".claude\\projects"));
 
         let gemini_dir = Provider::Gemini.default_dir();
-        assert!(gemini_dir.to_string_lossy().ends_with(".gemini/projects")
-            || gemini_dir.to_string_lossy().ends_with(".gemini\\projects"));
-
-        let codex_dir = Provider::Codex.default_dir();
-        assert!(codex_dir.to_string_lossy().ends_with(".codex/projects")
-            || codex_dir.to_string_lossy().ends_with(".codex\\projects"));
+        assert!(gemini_dir.to_string_lossy().ends_with(".gemini/tmp")
+            || gemini_dir.to_string_lossy().ends_with(".gemini\\tmp"));
 
         let openclaw_dir = Provider::OpenClaw.default_dir();
-        assert!(openclaw_dir.to_string_lossy().ends_with(".openclaw/projects")
-            || openclaw_dir.to_string_lossy().ends_with(".openclaw\\projects"));
+        assert!(openclaw_dir.to_string_lossy().ends_with(".openclaw/agents")
+            || openclaw_dir.to_string_lossy().ends_with(".openclaw\\agents"));
+    }
+
+    #[test]
+    fn test_provider_all() {
+        let all = Provider::all();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0], Provider::Claude);
+        assert_eq!(all[1], Provider::Gemini);
+        assert_eq!(all[2], Provider::OpenClaw);
     }
 }

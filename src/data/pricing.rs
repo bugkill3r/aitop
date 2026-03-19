@@ -47,6 +47,12 @@ impl PricingRegistry {
         };
 
         // Google Gemini models
+        let gemini_3_pro = ModelPrice {
+            input: 2.50,
+            output: 15.00,
+            cache_read: 0.625,
+            cache_creation: 3.125,
+        };
         let gemini_25_pro = ModelPrice {
             input: 1.25,
             output: 10.00,
@@ -102,6 +108,7 @@ impl PricingRegistry {
             PricingRule { pattern: "claude-3-7-sonnet".into(), price: sonnet.clone() },
             PricingRule { pattern: "sonnet".into(), price: sonnet.clone() },
             // Gemini
+            PricingRule { pattern: "gemini-3-pro".into(), price: gemini_3_pro },
             PricingRule { pattern: "gemini-2.5-pro".into(), price: gemini_25_pro },
             PricingRule { pattern: "gemini-2.5-flash".into(), price: gemini_25_flash },
             PricingRule { pattern: "gemini-2.0-flash".into(), price: gemini_20_flash },
@@ -230,6 +237,10 @@ mod tests {
     #[test]
     fn test_pricing_gemini_models() {
         let reg = PricingRegistry::builtin();
+
+        let price = reg.lookup("gemini-3-pro-preview");
+        assert_eq!(price.input, 2.50);
+        assert_eq!(price.output, 15.00);
 
         let price = reg.lookup("gemini-2.5-pro");
         assert_eq!(price.input, 1.25);

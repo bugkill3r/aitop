@@ -16,7 +16,8 @@ pub fn watch_directory(
         move |result: std::result::Result<Event, notify::Error>| {
             if let Ok(event) = result {
                 for path in event.paths {
-                    if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                    let ext = path.extension().and_then(|e| e.to_str());
+                    if ext == Some("jsonl") || ext == Some("json") {
                         let _ = tx.send(FsEvent::Changed(path.to_string_lossy().to_string()));
                     }
                 }
