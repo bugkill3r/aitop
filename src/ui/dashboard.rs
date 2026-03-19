@@ -261,7 +261,14 @@ fn render_model_breakdown(f: &mut Frame, state: &AppState, theme: &Theme, area: 
         );
     } else {
         let max_cost = state.models.iter().map(|m| m.cost).fold(0.0f64, f64::max);
-        let bar_width = (inner.width as usize).saturating_sub(30);
+        // Compute model name column width dynamically
+        let name_col = state.models.iter()
+            .map(|m| shorten_model(&m.model).len())
+            .max()
+            .unwrap_or(10)
+            .max(10);
+        // 2 (indent) + name_col + 1 (space) + cost ~12 chars = overhead
+        let bar_width = (inner.width as usize).saturating_sub(name_col + 16);
 
         let mut lines = Vec::new();
         for model in &state.models {
@@ -276,7 +283,7 @@ fn render_model_breakdown(f: &mut Frame, state: &AppState, theme: &Theme, area: 
 
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("  {:<14}", short_name),
+                    format!("  {:<width$}", short_name, width = name_col),
                     Style::default().fg(theme.text),
                 ),
                 Span::styled(bar, Style::default().fg(theme.bar_filled)),
