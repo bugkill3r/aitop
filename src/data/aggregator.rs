@@ -2,6 +2,8 @@ use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::path::Path;
 
+use super::pricing::PricingRegistry;
+
 /// Top-level stats for the dashboard.
 #[derive(Debug, Clone, Default)]
 pub struct DashboardStats {
@@ -26,6 +28,7 @@ pub struct ModelStats {
     pub cache_read: i64,
     pub cache_creation: i64,
     pub call_count: i64,
+    pub provider: String,
 }
 
 /// Session summary for the sessions list.
@@ -39,6 +42,7 @@ pub struct SessionSummary {
     pub msg_count: i64,
     pub started_at: String,
     pub updated_at: String,
+    pub provider: String,
 }
 
 /// Daily spend data point.
@@ -67,6 +71,7 @@ pub struct ActivityEntry {
     pub output_tokens: i64,
     pub cache_read: i64,
     pub cost_usd: f64,
+    pub provider: String,
 }
 
 /// Individual message within a session (for detail popup).
@@ -125,15 +130,20 @@ pub struct ContributionDay {
 
 pub struct Aggregator {
     conn: Connection,
+    pricing: PricingRegistry,
 }
 
 impl Aggregator {
     pub fn open(db_path: &Path) -> Result<Self> {
+        Self::open_with_pricing(db_path, PricingRegistry::builtin())
+    }
+
+    pub fn open_with_pricing(db_path: &Path, pricing: PricingRegistry) -> Result<Self> {
         let conn = Connection::open_with_flags(
             db_path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        Ok(Aggregator { conn })
+        Ok(Aggregator { conn, pricing })
     }
 
     pub fn dashboard_stats(&self) -> Result<DashboardStats> {
@@ -190,7 +200,8 @@ impl Aggregator {
     pub fn model_breakdown(&self) -> Result<Vec<ModelStats>> {
         let mut stmt = self.conn.prepare(
             "SELECT COALESCE(model, 'unknown'), SUM(cost_usd), SUM(input_tokens),
-                    SUM(output_tokens), SUM(cache_read), SUM(cache_creation), COUNT(*)
+                    SUM(output_tokens), SUM(cache_read), SUM(cache_creation), COUNT(*),
+                    COALESCE(provider, 'claude')
              FROM messages
              WHERE model IS NOT NULL AND model != ''
              GROUP BY model
@@ -206,6 +217,7 @@ impl Aggregator {
                 cache_read: row.get(4)?,
                 cache_creation: row.get(5)?,
                 call_count: row.get(6)?,
+                provider: row.get(7)?,
             })
         })?;
 
@@ -217,7 +229,8 @@ impl Aggregator {
             "SELECT s.id, s.project, COALESCE(s.model, 'unknown'), s.started_at, s.updated_at,
                     COALESCE(SUM(m.cost_usd), 0),
                     COALESCE(SUM(m.input_tokens + m.output_tokens), 0),
-                    COUNT(m.id)
+                    COUNT(m.id),
+                    COALESCE(s.provider, 'claude')
              FROM sessions s
              LEFT JOIN messages m ON s.id = m.session_id
              GROUP BY s.id
@@ -235,6 +248,7 @@ impl Aggregator {
                 total_cost: row.get(5)?,
                 total_tokens: row.get(6)?,
                 msg_count: row.get(7)?,
+                provider: row.get(8)?,
             })
         })?;
 
@@ -287,7 +301,8 @@ impl Aggregator {
     pub fn recent_activity(&self, limit: usize) -> Result<Vec<ActivityEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT m.timestamp, s.project, COALESCE(m.model, 'unknown'),
-                    m.input_tokens, m.output_tokens, m.cache_read, m.cost_usd
+                    m.input_tokens, m.output_tokens, m.cache_read, m.cost_usd,
+                    COALESCE(m.provider, 'claude')
              FROM messages m
              JOIN sessions s ON m.session_id = s.id
              WHERE m.type = 'assistant' AND m.model IS NOT NULL
@@ -304,6 +319,7 @@ impl Aggregator {
                 output_tokens: row.get(4)?,
                 cache_read: row.get(5)?,
                 cost_usd: row.get(6)?,
+                provider: row.get(7)?,
             })
         })?;
 
@@ -362,7 +378,6 @@ impl Aggregator {
         let total_current: f64 = current_models.iter().map(|(_, c)| c).sum();
 
         // Get total cost from previous equivalent period for comparison
-        // We approximate: if since_ts was 2h ago, compare with the 2h before that
         let total_previous: f64 = self.conn.query_row(
             "SELECT COALESCE(SUM(cost_usd), 0) FROM messages
              WHERE timestamp <= ?1
@@ -391,7 +406,7 @@ impl Aggregator {
             let prev_pct = if total_previous > 0.0 { prev_cost / total_previous * 100.0 } else { 0.0 };
             let pct_change = current_pct - prev_pct;
             if pct_change.abs() > 1.0 {
-                let short = model.replace("claude-", "").replace("-20241022", "").replace("-20250514", "");
+                let short = shorten_model(model);
                 model_changes.push(ModelChange {
                     model: short,
                     pct_change,
@@ -499,22 +514,23 @@ impl Aggregator {
             0.0
         };
 
-        // Cache savings: cache_read tokens * (normal_input_price - cache_price) per million
-        // We approximate using sonnet pricing as the average: input=$3, cache=$0.30 => savings = $2.70/Mtok
-        // For a more accurate measure, we compute per-model
-        let cache_savings: f64 = self.conn.query_row(
-            "SELECT COALESCE(SUM(
-                CASE
-                    WHEN LOWER(model) LIKE '%opus%' THEN cache_read * (15.0 - 1.50) / 1000000.0
-                    WHEN LOWER(model) LIKE '%haiku%' THEN cache_read * (0.80 - 0.08) / 1000000.0
-                    ELSE cache_read * (3.0 - 0.30) / 1000000.0
-                END
-             ), 0)
+        // Cache savings: compute per-model using the pricing registry
+        let mut cache_stmt = self.conn.prepare(
+            "SELECT COALESCE(model, 'unknown'), COALESCE(SUM(cache_read), 0)
              FROM messages
-             WHERE model IS NOT NULL",
-            [],
-            |row| row.get(0),
+             WHERE model IS NOT NULL
+             GROUP BY model",
         )?;
+        let cache_rows = cache_stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+        let mut cache_savings = 0.0;
+        for row in cache_rows.flatten() {
+            let (model, cache_read) = row;
+            let price = self.pricing.lookup(&model);
+            cache_savings += cache_read as f64 * (price.input - price.cache_read) / 1_000_000.0;
+        }
 
         Ok(EfficiencyStats {
             tokens_per_dollar,
@@ -640,4 +656,12 @@ fn format_since_label(iso: &str) -> String {
     } else {
         format!("{}w ago", diff.num_days() / 7)
     }
+}
+
+/// Shorten a model name for display.
+fn shorten_model(model: &str) -> String {
+    model
+        .replace("claude-", "")
+        .replace("-20241022", "")
+        .replace("-20250514", "")
 }

@@ -3,18 +3,25 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 
 use super::parser::{ParsedMessage, ParsedSession};
+use super::pricing::PricingRegistry;
 use super::scanner::SessionFile;
 
 pub struct Database {
     conn: Connection,
+    pricing: PricingRegistry,
 }
 
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_pricing(path, PricingRegistry::builtin())
+    }
+
+    pub fn open_with_pricing(path: &Path, pricing: PricingRegistry) -> Result<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
-        let db = Database { conn };
+        let db = Database { conn, pricing };
         db.create_tables()?;
+        db.migrate()?;
         Ok(db)
     }
 
@@ -27,7 +34,8 @@ impl Database {
                 started_at  TEXT NOT NULL,
                 updated_at  TEXT NOT NULL,
                 model       TEXT,
-                version     TEXT
+                version     TEXT,
+                provider    TEXT DEFAULT 'claude'
             );
 
             CREATE TABLE IF NOT EXISTS messages (
@@ -40,7 +48,8 @@ impl Database {
                 output_tokens   INTEGER DEFAULT 0,
                 cache_read      INTEGER DEFAULT 0,
                 cache_creation  INTEGER DEFAULT 0,
-                cost_usd        REAL DEFAULT 0.0
+                cost_usd        REAL DEFAULT 0.0,
+                provider        TEXT DEFAULT 'claude'
             );
 
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
@@ -58,6 +67,46 @@ impl Database {
                 value TEXT NOT NULL
             );
             ",
+        )?;
+        Ok(())
+    }
+
+    /// Run schema migrations.
+    fn migrate(&self) -> Result<()> {
+        let version = self.get_schema_version()?;
+
+        if version < 2 {
+            // Add provider column to sessions and messages if not already present
+            let _ = self.conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN provider TEXT DEFAULT 'claude';"
+            );
+            let _ = self.conn.execute_batch(
+                "ALTER TABLE messages ADD COLUMN provider TEXT DEFAULT 'claude';"
+            );
+            self.set_schema_version(2)?;
+        }
+
+        Ok(())
+    }
+
+    fn get_schema_version(&self) -> Result<i64> {
+        let result = self.conn.query_row(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(val) => Ok(val.parse::<i64>().unwrap_or(1)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(1),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn set_schema_version(&self, version: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO metadata (key, value) VALUES ('schema_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1",
+            params![version.to_string()],
         )?;
         Ok(())
     }
@@ -88,8 +137,8 @@ impl Database {
 
     pub fn upsert_session(&self, session: &ParsedSession) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO sessions (id, project, started_at, updated_at, model, version)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO sessions (id, project, started_at, updated_at, model, version, provider)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET
                 updated_at = MAX(sessions.updated_at, ?4),
                 model = COALESCE(?5, sessions.model),
@@ -101,6 +150,7 @@ impl Database {
                 session.updated_at,
                 session.model,
                 session.version,
+                session.provider,
             ],
         )?;
         Ok(())
@@ -108,8 +158,8 @@ impl Database {
 
     pub fn insert_message(&self, msg: &ParsedMessage) -> Result<()> {
         self.conn.execute(
-            "INSERT OR IGNORE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT OR IGNORE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 msg.uuid,
                 msg.session_id,
@@ -121,6 +171,7 @@ impl Database {
                 msg.cache_read,
                 msg.cache_creation,
                 msg.cost_usd,
+                msg.provider,
             ],
         )?;
         Ok(())
@@ -197,18 +248,17 @@ impl Database {
                 continue;
             }
             if let Some((session, message)) =
-                super::parser::parse_jsonl_line(line, &file.project)
+                super::parser::parse_jsonl_line(line, &file.project, &self.pricing)
             {
                 if let Some(s) = session {
-                    // Use unchecked since we're in a transaction
                     tx.execute(
-                        "INSERT INTO sessions (id, project, started_at, updated_at, model, version)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                        "INSERT INTO sessions (id, project, started_at, updated_at, model, version, provider)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                          ON CONFLICT(id) DO UPDATE SET
                             updated_at = MAX(sessions.updated_at, ?4),
                             model = COALESCE(?5, sessions.model),
                             version = COALESCE(?6, sessions.version)",
-                        params![s.id, s.project, s.started_at, s.updated_at, s.model, s.version],
+                        params![s.id, s.project, s.started_at, s.updated_at, s.model, s.version, s.provider],
                     )?;
                 }
                 if let Some(m) = message {
@@ -220,9 +270,9 @@ impl Database {
                         )?;
                     }
                     tx.execute(
-                        "INSERT OR IGNORE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                        params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd],
+                        "INSERT OR IGNORE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd, m.provider],
                     )?;
                 }
             }
