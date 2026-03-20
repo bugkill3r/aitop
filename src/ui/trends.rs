@@ -52,7 +52,7 @@ fn render_chart(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::l
             Span::styled("  ", Style::default()),
             Span::styled("w", Style::default().fg(theme.tertiary).add_modifier(Modifier::UNDERLINED)),
             Span::styled("eek ", Style::default().fg(theme.text_dim)),
-            Span::styled("m", Style::default().fg(theme.tertiary).add_modifier(Modifier::UNDERLINED)),
+            Span::styled("m", Style::default().fg(theme.text_dim)),
             Span::styled("o", Style::default().fg(theme.tertiary).add_modifier(Modifier::UNDERLINED)),
             Span::styled("nth ", Style::default().fg(theme.text_dim)),
             Span::styled("a", Style::default().fg(theme.tertiary).add_modifier(Modifier::UNDERLINED)),
