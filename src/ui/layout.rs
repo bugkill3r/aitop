@@ -28,6 +28,59 @@ pub fn is_wide(area: Rect) -> bool {
     layout_tier(area) == LayoutTier::Wide
 }
 
+/// Split content area horizontally 50/50 for split-pane mode.
+pub fn split_content(content: Rect) -> (Rect, Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(content);
+    (chunks[0], chunks[1])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_main_layout_proportions() {
+        let area = Rect::new(0, 0, 120, 40);
+        let (tab, content, status) = main_layout(area);
+        assert_eq!(tab.height, 3, "tab bar should be 3 rows");
+        assert_eq!(status.height, 1, "status bar should be 1 row");
+        assert_eq!(content.height, 36, "content should fill remaining space");
+        assert_eq!(tab.width, 120);
+        assert_eq!(content.width, 120);
+        assert_eq!(status.width, 120);
+    }
+
+    #[test]
+    fn test_split_content_proportions() {
+        let content = Rect::new(0, 3, 120, 36);
+        let (left, right) = split_content(content);
+
+        assert_eq!(left.width, 60, "left pane should be 50%");
+        assert_eq!(right.width, 60, "right pane should be 50%");
+        assert_eq!(left.height, content.height);
+        assert_eq!(right.height, content.height);
+        assert_eq!(left.x, content.x, "left pane starts at content left");
+        assert_eq!(right.x, 60, "right pane starts at midpoint");
+    }
+
+    #[test]
+    fn test_split_content_odd_width() {
+        let content = Rect::new(0, 3, 101, 36);
+        let (left, right) = split_content(content);
+
+        // Ratatui's 50/50 split rounds; total should cover full width
+        assert!(
+            left.width + right.width >= 100 && left.width + right.width <= 101,
+            "left + right should approximately equal content width: {} + {} vs {}",
+            left.width, right.width, content.width
+        );
+    }
+
+}
+
 /// Split the main area into: tab bar (3 rows) + content area + status bar (1 row).
 pub fn main_layout(area: Rect) -> (Rect, Rect, Rect) {
     let chunks = Layout::default()
@@ -131,14 +184,12 @@ pub struct DashboardAreas {
 }
 
 #[cfg(test)]
-mod tests {
+mod layout_tier_tests {
     use super::*;
 
     fn rect(w: u16, h: u16) -> Rect {
         Rect::new(0, 0, w, h)
     }
-
-    // --- LayoutTier tests (RED: these should fail because LayoutTier doesn't exist yet) ---
 
     #[test]
     fn test_layout_tier_compact() {

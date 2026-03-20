@@ -15,6 +15,9 @@ pub struct Config {
 
     pub weekly_budget: Option<f64>,
 
+    /// Daily budget threshold for desktop notifications
+    pub budget: Option<f64>,
+
     #[serde(alias = "claude_data_dir")]
     pub data_dir: Option<String>,
 
@@ -38,6 +41,7 @@ impl Default for Config {
             refresh: default_refresh(),
             theme: default_theme(),
             weekly_budget: None,
+            budget: None,
             data_dir: None,
             admin_api_key: None,
             model_pricing: HashMap::new(),

@@ -46,6 +46,10 @@ struct Args {
     #[arg(long)]
     light: bool,
 
+    /// Output compact one-line summary for tmux status bar
+    #[arg(long)]
+    tmux_status: bool,
+
     /// Filter by project name
     #[arg(short, long)]
     project: Option<String>,
@@ -160,6 +164,11 @@ fn main() -> Result<()> {
         return print_light_mode(&db_path, pricing);
     }
 
+    if args.tmux_status {
+        drop(db);
+        return print_tmux_status(&db_path);
+    }
+
     run_tui(config, db, &db_path, &projects_dir, pricing)
 }
 
@@ -204,6 +213,16 @@ fn print_light_mode(db_path: &std::path::Path, pricing: PricingRegistry) -> Resu
     );
     println!();
 
+    Ok(())
+}
+
+fn print_tmux_status(db_path: &std::path::Path) -> Result<()> {
+    let agg = Aggregator::open(db_path)?;
+    let stats = agg.dashboard_stats()?;
+    print!(
+        "{}",
+        aitop::app::format_tmux_status(stats.burn_rate_per_hour, stats.spend_today, stats.total_sessions)
+    );
     Ok(())
 }
 
@@ -303,6 +322,7 @@ fn run_event_loop(
     watcher_rx: &mpsc::Receiver<String>,
 ) -> Result<()> {
     let mut last_refresh = Instant::now();
+    let mut last_replay_tick = Instant::now();
     let max_refresh_interval = Duration::from_secs(30);
     let debounce_interval = Duration::from_millis(500);
 
@@ -312,16 +332,28 @@ fn run_event_loop(
 
         terminal.draw(|f| {
             let (tab_area, content_area, status_bar_area) = ui::layout::main_layout(f.area());
-            state.content_area = content_area;
             state.status_bar_area = status_bar_area;
 
             render_tab_bar(f, state, theme, tab_area);
 
-            match state.view {
-                View::Dashboard => ui::dashboard::render_dashboard(f, state, theme),
-                View::Sessions => ui::sessions::render_sessions(f, state, theme),
-                View::Models => ui::models::render_models(f, state, theme),
-                View::Trends => ui::trends::render_trends(f, state, theme),
+            if state.split_mode {
+                let (left_area, right_area) = ui::layout::split_content(content_area);
+
+                // Left pane: current view
+                state.content_area = left_area;
+                render_view(f, state, theme, state.view);
+
+                // Right pane: split view
+                if let Some(right_view) = state.split_view {
+                    state.content_area = right_area;
+                    render_view(f, state, theme, right_view);
+                }
+
+                // Restore content_area for other overlays
+                state.content_area = content_area;
+            } else {
+                state.content_area = content_area;
+                render_view(f, state, theme, state.view);
             }
 
             render_status_bar(f, state, theme, status_bar_area, secs_until);
@@ -345,6 +377,15 @@ fn run_event_loop(
 
         state.advance_pulse();
         state.check_banner_timeout();
+
+        // Replay auto-advance
+        if state.replay_active && !state.replay_paused {
+            let replay_interval = Duration::from_millis(1000 / state.replay_speed as u64);
+            if last_replay_tick.elapsed() >= replay_interval {
+                state.replay_advance();
+                last_replay_tick = Instant::now();
+            }
+        }
 
         let timeout = Duration::from_millis(100);
         if event::poll(timeout)? {
@@ -414,6 +455,9 @@ fn run_event_loop(
             state.refresh_data(agg);
             last_refresh = Instant::now();
         }
+
+        // Check budget notifications after data refresh
+        state.check_budget_notifications();
     }
 
     Ok(())
@@ -435,6 +479,11 @@ fn handle_key(
 
     if state.filter_active {
         handle_filter_key(state, key);
+        return;
+    }
+
+    if state.replay_active {
+        handle_replay_key(state, key);
         return;
     }
 
@@ -460,8 +509,23 @@ fn handle_key(
 
         KeyCode::Char('?') | KeyCode::F(1) => state.show_help = true,
         KeyCode::Char('r') => state.needs_refresh = true,
+        KeyCode::Char('\\') => state.toggle_split(),
         KeyCode::Char('/') => {
             state.filter_active = true;
+        }
+
+        // Split pane: Shift+letter changes right pane view
+        KeyCode::Char('D') if state.split_mode => {
+            state.split_view = Some(View::Dashboard);
+        }
+        KeyCode::Char('S') if state.split_mode => {
+            state.split_view = Some(View::Sessions);
+        }
+        KeyCode::Char('M') if state.split_mode => {
+            state.split_view = Some(View::Models);
+        }
+        KeyCode::Char('T') if state.split_mode => {
+            state.split_view = Some(View::Trends);
         }
 
         KeyCode::Char('p') if state.view != View::Sessions => {
@@ -492,6 +556,25 @@ fn handle_sessions_key(state: &mut AppState, key: event::KeyEvent, agg: &Aggrega
                 }
                 state.detail_session = Some(session_id);
                 state.detail_scroll = 0;
+            }
+        }
+        KeyCode::Char('y') => {
+            // Copy selected session info to clipboard
+            if let Some(idx) = state.session_table_state.selected() {
+                if let Some(session) = state.displayed_sessions().get(idx).cloned() {
+                    let text = aitop::app::format_session_for_clipboard(&session);
+                    if aitop::app::copy_to_clipboard(&text) {
+                        state.copy_flash = Some(Instant::now());
+                    }
+                }
+            }
+        }
+        KeyCode::Char('Y') => {
+            // Copy all visible sessions as TSV
+            let sessions = state.displayed_sessions().to_vec();
+            let tsv = aitop::app::format_sessions_as_tsv(&sessions);
+            if aitop::app::copy_to_clipboard(&tsv) {
+                state.copy_flash = Some(Instant::now());
             }
         }
         KeyCode::Char('c') => toggle_sort(state, SessionSort::Cost),
@@ -526,6 +609,19 @@ fn handle_detail_key(state: &mut AppState, key: event::KeyEvent) {
         KeyCode::Up | KeyCode::Char('k') => {
             state.detail_scroll = state.detail_scroll.saturating_sub(1);
         }
+        KeyCode::Char('R') => {
+            state.start_replay();
+        }
+        _ => {}
+    }
+}
+
+fn handle_replay_key(state: &mut AppState, key: event::KeyEvent) {
+    match key.code {
+        KeyCode::Esc => state.stop_replay(),
+        KeyCode::Char(' ') => state.toggle_replay_pause(),
+        KeyCode::Char('+') | KeyCode::Char('=') => state.replay_speed_up(),
+        KeyCode::Char('-') => state.replay_speed_down(),
         _ => {}
     }
 }
@@ -597,6 +693,20 @@ fn handle_trends_key(state: &mut AppState, key: event::KeyEvent) {
     }
 }
 
+fn render_view(
+    f: &mut ratatui::Frame,
+    state: &mut AppState,
+    theme: &ui::theme::Theme,
+    view: View,
+) {
+    match view {
+        View::Dashboard => ui::dashboard::render_dashboard(f, state, theme),
+        View::Sessions => ui::sessions::render_sessions(f, state, theme),
+        View::Models => ui::models::render_models(f, state, theme),
+        View::Trends => ui::trends::render_trends(f, state, theme),
+    }
+}
+
 fn render_tab_bar(
     f: &mut ratatui::Frame,
     state: &AppState,
@@ -658,12 +768,22 @@ fn render_status_bar(
     area: Rect,
     secs_until_refresh: u64,
 ) {
-    let left_text = format!(
-        "aitop v{} \u{2502} {} sessions \u{2502} ${:.2} all-time",
-        env!("CARGO_PKG_VERSION"),
-        state.dashboard.total_sessions,
-        state.dashboard.spend_all_time
-    );
+    // Show "Copied!" flash for 2 seconds
+    let flash_active = state.copy_flash.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2));
+
+    let left_text = if flash_active {
+        format!(
+            "Copied! \u{2502} aitop v{} \u{2502} {} sessions \u{2502} ${:.2} all-time",
+            env!("CARGO_PKG_VERSION"),
+            state.dashboard.total_sessions, state.dashboard.spend_all_time
+        )
+    } else {
+        format!(
+            "aitop v{} \u{2502} {} sessions \u{2502} ${:.2} all-time",
+            env!("CARGO_PKG_VERSION"),
+            state.dashboard.total_sessions, state.dashboard.spend_all_time
+        )
+    };
 
     // Show theme name flash for 2 seconds after cycling
     let theme_flash_active = state

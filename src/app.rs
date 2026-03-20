@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use ratatui::layout::Rect;
@@ -112,6 +112,22 @@ pub struct AppState {
     // Theme flash
     pub theme_flash: Option<Instant>,
 
+    // Split panes
+    pub split_mode: bool,
+    pub split_view: Option<View>,
+
+    // Clipboard flash
+    pub copy_flash: Option<Instant>,
+
+    // Budget notification tracking
+    pub notified_thresholds: HashSet<u8>,
+
+    // Session replay
+    pub replay_active: bool,
+    pub replay_index: usize,
+    pub replay_speed: u8,
+    pub replay_paused: bool,
+
     // Control
     pub should_quit: bool,
     pub needs_refresh: bool,
@@ -175,6 +191,18 @@ impl AppState {
             pulse_tick: 0,
 
             theme_flash: None,
+
+            split_mode: false,
+            split_view: None,
+
+            copy_flash: None,
+
+            notified_thresholds: HashSet::new(),
+
+            replay_active: false,
+            replay_index: 0,
+            replay_speed: 1,
+            replay_paused: false,
 
             should_quit: false,
             needs_refresh: true,
@@ -350,20 +378,573 @@ impl AppState {
     pub fn sort_indicator(&self) -> &str {
         if self.sort_ascending { " \u{25B2}" } else { " \u{25BC}" }
     }
+
+    /// Check budget thresholds and send notifications for newly crossed ones.
+    /// Returns the list of newly notified thresholds (for testing).
+    pub fn check_budget_notifications(&mut self) -> Vec<u8> {
+        let budget = match self.config.budget {
+            Some(b) if b > 0.0 => b,
+            _ => return Vec::new(),
+        };
+
+        let new_thresholds = check_budget_thresholds(
+            budget,
+            self.dashboard.spend_today,
+            &self.notified_thresholds,
+        );
+
+        for &threshold in &new_thresholds {
+            let msg = format!(
+                "Spend today: ${:.2} ({:.0}% of ${:.2} budget)",
+                self.dashboard.spend_today,
+                self.dashboard.spend_today / budget * 100.0,
+                budget,
+            );
+            send_desktop_notification("aitop Budget Alert", &msg);
+            self.notified_thresholds.insert(threshold);
+        }
+
+        new_thresholds
+    }
+
+    /// Toggle split mode on/off.
+    pub fn toggle_split(&mut self) {
+        self.split_mode = !self.split_mode;
+        if self.split_mode {
+            // Default right pane to a different view than current
+            self.split_view = Some(match self.view {
+                View::Dashboard => View::Sessions,
+                View::Sessions => View::Dashboard,
+                View::Models => View::Dashboard,
+                View::Trends => View::Dashboard,
+            });
+        } else {
+            self.split_view = None;
+        }
+    }
+
+    /// Enter replay mode for the current session detail.
+    pub fn start_replay(&mut self) {
+        if self.detail_session.is_some() && !self.detail_messages.is_empty() {
+            self.replay_active = true;
+            self.replay_index = 0;
+            self.replay_speed = 1;
+            self.replay_paused = false;
+        }
+    }
+
+    /// Exit replay mode.
+    pub fn stop_replay(&mut self) {
+        self.replay_active = false;
+        self.replay_index = 0;
+        self.replay_speed = 1;
+        self.replay_paused = false;
+    }
+
+    /// Toggle replay pause/resume.
+    pub fn toggle_replay_pause(&mut self) {
+        if self.replay_active {
+            self.replay_paused = !self.replay_paused;
+        }
+    }
+
+    /// Increase replay speed: 1 -> 2 -> 5 -> 10.
+    pub fn replay_speed_up(&mut self) {
+        if self.replay_active {
+            self.replay_speed = match self.replay_speed {
+                1 => 2,
+                2 => 5,
+                5 => 10,
+                _ => 10,
+            };
+        }
+    }
+
+    /// Decrease replay speed: 10 -> 5 -> 2 -> 1.
+    pub fn replay_speed_down(&mut self) {
+        if self.replay_active {
+            self.replay_speed = match self.replay_speed {
+                10 => 5,
+                5 => 2,
+                2 => 1,
+                _ => 1,
+            };
+        }
+    }
+
+    /// Advance replay by one message. Returns true if advanced, false if at end.
+    pub fn replay_advance(&mut self) -> bool {
+        if !self.replay_active || self.replay_paused {
+            return false;
+        }
+        if self.replay_index < self.detail_messages.len().saturating_sub(1) {
+            self.replay_index += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get running totals up to and including `replay_index`.
+    pub fn replay_running_totals(&self) -> (i64, f64) {
+        if !self.replay_active || self.detail_messages.is_empty() {
+            return (0, 0.0);
+        }
+        let end = (self.replay_index + 1).min(self.detail_messages.len());
+        let msgs = &self.detail_messages[..end];
+        let tokens: i64 = msgs.iter().map(|m| m.input_tokens + m.output_tokens).sum();
+        let cost: f64 = msgs.iter().map(|m| m.cost_usd).sum();
+        (tokens, cost)
+    }
+}
+
+/// Budget threshold percentages to check for notifications.
+const BUDGET_THRESHOLDS: &[u8] = &[50, 75, 90, 100];
+
+/// Determine which budget thresholds have been crossed based on current spend.
+/// Returns thresholds that are newly crossed (not already in `already_notified`).
+pub fn check_budget_thresholds(
+    budget: f64,
+    current_spend: f64,
+    already_notified: &HashSet<u8>,
+) -> Vec<u8> {
+    if budget <= 0.0 {
+        return Vec::new();
+    }
+    let pct = (current_spend / budget * 100.0) as u8;
+    BUDGET_THRESHOLDS
+        .iter()
+        .filter(|&&threshold| pct >= threshold && !already_notified.contains(&threshold))
+        .copied()
+        .collect()
+}
+
+/// Send a desktop notification using platform-specific commands.
+pub fn send_desktop_notification(title: &str, message: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let script = format!(
+            "display notification \"{}\" with title \"{}\"",
+            message.replace('"', "\\\""),
+            title.replace('"', "\\\""),
+        );
+        Command::new("osascript")
+            .args(["-e", &script])
+            .output()
+            .is_ok()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::process::Command;
+        Command::new("notify-send")
+            .args([title, message])
+            .output()
+            .is_ok()
+    }
+}
+
+/// Format a single session as a human-readable clipboard string.
+pub fn format_session_for_clipboard(session: &SessionSummary) -> String {
+    format!(
+        "Session: {}\nProject: {}\nModel: {}\nTokens: {}\nCost: ${:.4}\nMessages: {}\nStarted: {}\nUpdated: {}",
+        session.id, session.project, session.model, session.total_tokens,
+        session.total_cost, session.msg_count, session.started_at, session.updated_at,
+    )
+}
+
+/// Format a list of sessions as TSV (tab-separated values) for clipboard.
+pub fn format_sessions_as_tsv(sessions: &[SessionSummary]) -> String {
+    let mut lines = Vec::with_capacity(sessions.len() + 1);
+    lines.push("Project\tModel\tTokens\tCost\tMessages\tStarted\tUpdated".to_string());
+    for s in sessions {
+        lines.push(format!(
+            "{}\t{}\t{}\t${:.4}\t{}\t{}\t{}",
+            s.project, s.model, s.total_tokens, s.total_cost, s.msg_count, s.started_at, s.updated_at,
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Copy text to system clipboard using platform-specific commands.
+pub fn copy_to_clipboard(text: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::{Command, Stdio};
+        if let Ok(mut child) = Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .spawn()
+        {
+            if let Some(stdin) = child.stdin.as_mut() {
+                use std::io::Write;
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            return child.wait().is_ok();
+        }
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::process::{Command, Stdio};
+        // Try xclip first, then xsel
+        let cmds = ["xclip", "xsel"];
+        for cmd in &cmds {
+            if let Ok(mut child) = Command::new(cmd)
+                .args(["-selection", "clipboard"])
+                .stdin(Stdio::piped())
+                .spawn()
+            {
+                if let Some(stdin) = child.stdin.as_mut() {
+                    use std::io::Write;
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+                if child.wait().is_ok() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+/// Format a compact one-line tmux status bar string from dashboard stats.
+pub fn format_tmux_status(burn_rate: f64, spend_today: f64, total_sessions: i64) -> String {
+    format!(
+        "#[fg=colour208]aitop:#[fg=colour255] ${:.2}/hr #[fg=colour240]|#[fg=colour255] ${:.2} today #[fg=colour240]|#[fg=colour255] {} sessions",
+        burn_rate, spend_today, total_sessions
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
 
-    fn test_state() -> AppState {
-        AppState::new(Config::default())
+    #[test]
+    fn test_tmux_status_format() {
+        let output = format_tmux_status(1.23, 45.67, 12);
+        assert!(output.contains("$1.23/hr"), "should contain burn rate");
+        assert!(output.contains("$45.67 today"), "should contain today's spend");
+        assert!(output.contains("12 sessions"), "should contain session count");
+        assert!(output.contains("#[fg="), "should contain tmux color codes");
     }
 
     #[test]
+    fn test_tmux_status_zero_values() {
+        let output = format_tmux_status(0.0, 0.0, 0);
+        assert!(output.contains("$0.00/hr"));
+        assert!(output.contains("$0.00 today"));
+        assert!(output.contains("0 sessions"));
+    }
+
+    fn make_test_state() -> AppState {
+        let config = Config::default();
+        AppState::new(config)
+    }
+
+    fn make_test_messages(n: usize) -> Vec<crate::data::aggregator::SessionMessage> {
+        (0..n)
+            .map(|i| crate::data::aggregator::SessionMessage {
+                id: format!("msg-{}", i),
+                timestamp: format!("2025-01-01T{:02}:00:00Z", i),
+                model: "claude-3-sonnet".to_string(),
+                msg_type: if i % 2 == 0 { "human".to_string() } else { "assistant".to_string() },
+                input_tokens: 100 * (i as i64 + 1),
+                output_tokens: 50 * (i as i64 + 1),
+                cache_read: 0,
+                cache_creation: 0,
+                cost_usd: 0.01 * (i as f64 + 1.0),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_replay_start_requires_session() {
+        let mut state = make_test_state();
+        // No detail session - should not activate
+        state.start_replay();
+        assert!(!state.replay_active);
+
+        // With session but no messages - should not activate
+        state.detail_session = Some("session-1".to_string());
+        state.start_replay();
+        assert!(!state.replay_active);
+
+        // With session and messages - should activate
+        state.detail_messages = make_test_messages(5);
+        state.start_replay();
+        assert!(state.replay_active);
+        assert_eq!(state.replay_index, 0);
+        assert_eq!(state.replay_speed, 1);
+        assert!(!state.replay_paused);
+    }
+
+    #[test]
+    fn test_replay_advance() {
+        let mut state = make_test_state();
+        state.detail_session = Some("session-1".to_string());
+        state.detail_messages = make_test_messages(3);
+        state.start_replay();
+
+        assert!(state.replay_advance()); // 0 -> 1
+        assert_eq!(state.replay_index, 1);
+        assert!(state.replay_advance()); // 1 -> 2
+        assert_eq!(state.replay_index, 2);
+        assert!(!state.replay_advance()); // at end, no advance
+        assert_eq!(state.replay_index, 2);
+    }
+
+    #[test]
+    fn test_replay_pause_blocks_advance() {
+        let mut state = make_test_state();
+        state.detail_session = Some("session-1".to_string());
+        state.detail_messages = make_test_messages(5);
+        state.start_replay();
+
+        state.toggle_replay_pause();
+        assert!(state.replay_paused);
+        assert!(!state.replay_advance()); // blocked
+        assert_eq!(state.replay_index, 0);
+
+        state.toggle_replay_pause();
+        assert!(!state.replay_paused);
+        assert!(state.replay_advance()); // unblocked
+        assert_eq!(state.replay_index, 1);
+    }
+
+    #[test]
+    fn test_replay_speed_changes() {
+        let mut state = make_test_state();
+        state.detail_session = Some("session-1".to_string());
+        state.detail_messages = make_test_messages(5);
+        state.start_replay();
+
+        assert_eq!(state.replay_speed, 1);
+        state.replay_speed_up();
+        assert_eq!(state.replay_speed, 2);
+        state.replay_speed_up();
+        assert_eq!(state.replay_speed, 5);
+        state.replay_speed_up();
+        assert_eq!(state.replay_speed, 10);
+        state.replay_speed_up();
+        assert_eq!(state.replay_speed, 10); // capped
+
+        state.replay_speed_down();
+        assert_eq!(state.replay_speed, 5);
+        state.replay_speed_down();
+        assert_eq!(state.replay_speed, 2);
+        state.replay_speed_down();
+        assert_eq!(state.replay_speed, 1);
+        state.replay_speed_down();
+        assert_eq!(state.replay_speed, 1); // capped
+    }
+
+    #[test]
+    fn test_replay_running_totals() {
+        let mut state = make_test_state();
+        state.detail_session = Some("session-1".to_string());
+        state.detail_messages = make_test_messages(3);
+        state.start_replay();
+
+        // At index 0: first message only
+        let (tokens, cost) = state.replay_running_totals();
+        assert_eq!(tokens, 150); // 100 + 50
+        assert!((cost - 0.01).abs() < 1e-9);
+
+        state.replay_advance(); // index 1
+        let (tokens, cost) = state.replay_running_totals();
+        assert_eq!(tokens, 150 + 300); // (100+50) + (200+100)
+        assert!((cost - 0.03).abs() < 1e-9);
+
+        state.replay_advance(); // index 2
+        let (tokens, cost) = state.replay_running_totals();
+        assert_eq!(tokens, 150 + 300 + 450); // + (300+150)
+        assert!((cost - 0.06).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_budget_threshold_detection_no_budget() {
+        let notified = HashSet::new();
+        let result = check_budget_thresholds(0.0, 10.0, &notified);
+        assert!(result.is_empty(), "no thresholds when budget is 0");
+    }
+
+    #[test]
+    fn test_budget_threshold_detection_below_first() {
+        let notified = HashSet::new();
+        let result = check_budget_thresholds(100.0, 40.0, &notified);
+        assert!(result.is_empty(), "no thresholds at 40% of budget");
+    }
+
+    #[test]
+    fn test_budget_threshold_detection_at_50() {
+        let notified = HashSet::new();
+        let result = check_budget_thresholds(100.0, 50.0, &notified);
+        assert_eq!(result, vec![50], "should trigger 50% threshold");
+    }
+
+    #[test]
+    fn test_budget_threshold_detection_at_80() {
+        let notified = HashSet::new();
+        let result = check_budget_thresholds(100.0, 80.0, &notified);
+        assert_eq!(result, vec![50, 75], "should trigger 50% and 75% thresholds");
+    }
+
+    #[test]
+    fn test_budget_threshold_detection_at_100() {
+        let notified = HashSet::new();
+        let result = check_budget_thresholds(100.0, 100.0, &notified);
+        assert_eq!(result, vec![50, 75, 90, 100], "should trigger all thresholds");
+    }
+
+    #[test]
+    fn test_budget_threshold_no_duplicates() {
+        let mut notified = HashSet::new();
+        notified.insert(50);
+        notified.insert(75);
+        let result = check_budget_thresholds(100.0, 95.0, &notified);
+        assert_eq!(result, vec![90], "should only trigger new thresholds");
+    }
+
+    #[test]
+    fn test_budget_notification_state_machine() {
+        let mut state = make_test_state();
+        state.config.budget = Some(100.0);
+
+        // Below any threshold
+        state.dashboard.spend_today = 30.0;
+        let result = state.check_budget_notifications();
+        assert!(result.is_empty());
+        assert!(state.notified_thresholds.is_empty());
+
+        // Cross 50%
+        state.dashboard.spend_today = 55.0;
+        let result = state.check_budget_notifications();
+        assert_eq!(result, vec![50]);
+        assert!(state.notified_thresholds.contains(&50));
+
+        // Still at 55%, no new notifications
+        let result = state.check_budget_notifications();
+        assert!(result.is_empty());
+
+        // Cross 75% and 90%
+        state.dashboard.spend_today = 92.0;
+        let result = state.check_budget_notifications();
+        assert!(result.contains(&75));
+        assert!(result.contains(&90));
+        assert!(!result.contains(&50), "50 already notified");
+    }
+
+    fn make_test_session(id: &str, project: &str, cost: f64) -> SessionSummary {
+        SessionSummary {
+            id: id.to_string(),
+            project: project.to_string(),
+            model: "claude-3-sonnet".to_string(),
+            total_cost: cost,
+            total_tokens: 1500,
+            msg_count: 10,
+            started_at: "2025-01-01T00:00:00Z".to_string(),
+            updated_at: "2025-01-01T01:00:00Z".to_string(),
+            provider: "claude".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_clipboard_single_session_format() {
+        let session = make_test_session("sess-1", "my-project", 1.2345);
+        let output = format_session_for_clipboard(&session);
+        assert!(output.contains("my-project"), "should contain project name");
+        assert!(output.contains("$1.2345"), "should contain cost");
+        assert!(output.contains("1500"), "should contain token count");
+        assert!(output.contains("Session: sess-1"), "should contain session id");
+    }
+
+    #[test]
+    fn test_clipboard_tsv_format() {
+        let sessions = vec![
+            make_test_session("s1", "proj-a", 0.50),
+            make_test_session("s2", "proj-b", 1.25),
+        ];
+        let tsv = format_sessions_as_tsv(&sessions);
+        let lines: Vec<&str> = tsv.lines().collect();
+        assert_eq!(lines.len(), 3, "header + 2 data rows");
+        assert!(lines[0].contains("Project"), "header should contain Project");
+        assert!(lines[0].contains('\t'), "header should be tab-separated");
+        assert!(lines[1].contains("proj-a"), "first row should contain proj-a");
+        assert!(lines[2].contains("proj-b"), "second row should contain proj-b");
+        assert!(lines[1].contains("$0.5000"), "cost should be formatted to 4 decimal places");
+    }
+
+    #[test]
+    fn test_clipboard_tsv_empty() {
+        let tsv = format_sessions_as_tsv(&[]);
+        let lines: Vec<&str> = tsv.lines().collect();
+        assert_eq!(lines.len(), 1, "only header for empty sessions");
+    }
+
+    #[test]
+    fn test_copy_flash_timeout() {
+        let mut state = make_test_state();
+        state.copy_flash = Some(Instant::now() - std::time::Duration::from_secs(5));
+        // After 2 seconds, flash should be considered expired
+        if let Some(flash_at) = state.copy_flash {
+            assert!(flash_at.elapsed() >= std::time::Duration::from_secs(2));
+        }
+    }
+
+    #[test]
+    fn test_split_toggle() {
+        let mut state = make_test_state();
+        assert!(!state.split_mode);
+        assert!(state.split_view.is_none());
+
+        state.toggle_split();
+        assert!(state.split_mode);
+        assert!(state.split_view.is_some());
+        // Default view is Dashboard, so split_view should be Sessions
+        assert_eq!(state.split_view, Some(View::Sessions));
+
+        state.toggle_split();
+        assert!(!state.split_mode);
+        assert!(state.split_view.is_none());
+    }
+
+    #[test]
+    fn test_split_default_view_differs() {
+        let mut state = make_test_state();
+
+        // When on Sessions, right pane should default to Dashboard
+        state.view = View::Sessions;
+        state.toggle_split();
+        assert_eq!(state.split_view, Some(View::Dashboard));
+        state.toggle_split();
+
+        // When on Models, right pane should default to Dashboard
+        state.view = View::Models;
+        state.toggle_split();
+        assert_eq!(state.split_view, Some(View::Dashboard));
+    }
+
+    #[test]
+    fn test_replay_stop() {
+        let mut state = make_test_state();
+        state.detail_session = Some("session-1".to_string());
+        state.detail_messages = make_test_messages(5);
+        state.start_replay();
+        state.replay_advance();
+        state.replay_speed_up();
+
+        state.stop_replay();
+        assert!(!state.replay_active);
+        assert_eq!(state.replay_index, 0);
+        assert_eq!(state.replay_speed, 1);
+        assert!(!state.replay_paused);
+    }
+
+    // --- v0.4 tests (pulse, layout) ---
+
+    #[test]
     fn test_pulse_tick_wraps() {
-        let mut state = test_state();
+        let mut state = make_test_state();
         state.pulse_tick = 255;
         state.advance_pulse();
         assert_eq!(state.pulse_tick, 0);
@@ -371,7 +952,7 @@ mod tests {
 
     #[test]
     fn test_pulse_tick_advances() {
-        let mut state = test_state();
+        let mut state = make_test_state();
         assert_eq!(state.pulse_tick, 0);
         state.advance_pulse();
         assert_eq!(state.pulse_tick, 1);
@@ -381,14 +962,14 @@ mod tests {
 
     #[test]
     fn test_pulse_indicator_idle() {
-        let state = test_state();
+        let state = make_test_state();
         // No live event => IDLE
         assert_eq!(state.pulse_indicator(), "\u{25CB}"); // ○
     }
 
     #[test]
     fn test_pulse_indicator_live_cycles() {
-        let mut state = test_state();
+        let mut state = make_test_state();
         state.last_live_event = Some(Instant::now());
 
         // Collect indicators for one full cycle
@@ -409,7 +990,7 @@ mod tests {
 
     #[test]
     fn test_pulse_indicator_periodicity() {
-        let mut state = test_state();
+        let mut state = make_test_state();
         state.last_live_event = Some(Instant::now());
 
         // After 8 ticks, should cycle back
@@ -422,7 +1003,7 @@ mod tests {
 
     #[test]
     fn test_live_status_recent_event() {
-        let mut state = test_state();
+        let mut state = make_test_state();
         state.last_live_event = Some(Instant::now());
         let (is_live, label) = state.live_status();
         assert!(is_live);
@@ -431,7 +1012,7 @@ mod tests {
 
     #[test]
     fn test_live_status_no_event() {
-        let state = test_state();
+        let state = make_test_state();
         let (is_live, label) = state.live_status();
         assert!(!is_live);
         assert_eq!(label, "IDLE");
