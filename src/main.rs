@@ -431,6 +431,25 @@ fn handle_sessions_key(state: &mut AppState, key: event::KeyEvent, agg: &Aggrega
                 state.detail_scroll = 0;
             }
         }
+        KeyCode::Char('y') => {
+            // Copy selected session info to clipboard
+            if let Some(idx) = state.session_table_state.selected() {
+                if let Some(session) = state.displayed_sessions().get(idx).cloned() {
+                    let text = app::format_session_for_clipboard(&session);
+                    if app::copy_to_clipboard(&text) {
+                        state.copy_flash = Some(Instant::now());
+                    }
+                }
+            }
+        }
+        KeyCode::Char('Y') => {
+            // Copy all visible sessions as TSV
+            let sessions = state.displayed_sessions().to_vec();
+            let tsv = app::format_sessions_as_tsv(&sessions);
+            if app::copy_to_clipboard(&tsv) {
+                state.copy_flash = Some(Instant::now());
+            }
+        }
         KeyCode::Char('c') => toggle_sort(state, SessionSort::Cost),
         KeyCode::Char('n') => toggle_sort(state, SessionSort::Tokens),
         KeyCode::Char('p') => toggle_sort(state, SessionSort::Project),
@@ -612,10 +631,20 @@ fn render_status_bar(
     area: Rect,
     secs_until_refresh: u64,
 ) {
-    let left_text = format!(
-        "aitop v0.1.0 \u{2502} {} sessions \u{2502} ${:.2} all-time",
-        state.dashboard.total_sessions, state.dashboard.spend_all_time
-    );
+    // Show "Copied!" flash for 2 seconds
+    let flash_active = state.copy_flash.is_some_and(|t| t.elapsed() < Duration::from_secs(2));
+
+    let left_text = if flash_active {
+        format!(
+            "Copied! \u{2502} aitop v0.1.0 \u{2502} {} sessions \u{2502} ${:.2} all-time",
+            state.dashboard.total_sessions, state.dashboard.spend_all_time
+        )
+    } else {
+        format!(
+            "aitop v0.1.0 \u{2502} {} sessions \u{2502} ${:.2} all-time",
+            state.dashboard.total_sessions, state.dashboard.spend_all_time
+        )
+    };
 
     let hints = match state.view {
         View::Dashboard => "d:dashboard  s:sessions  m:models  t:trends  ?:help  p:theme",

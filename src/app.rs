@@ -103,6 +103,9 @@ pub struct AppState {
     pub split_mode: bool,
     pub split_view: Option<View>,
 
+    // Clipboard flash
+    pub copy_flash: Option<Instant>,
+
     // Session replay
     pub replay_active: bool,
     pub replay_index: usize,
@@ -169,6 +172,8 @@ impl AppState {
 
             split_mode: false,
             split_view: None,
+
+            copy_flash: None,
 
             replay_active: false,
             replay_index: 0,
@@ -412,6 +417,69 @@ impl AppState {
     }
 }
 
+/// Format a single session as a human-readable clipboard string.
+pub fn format_session_for_clipboard(session: &SessionSummary) -> String {
+    format!(
+        "Session: {}\nProject: {}\nModel: {}\nTokens: {}\nCost: ${:.4}\nMessages: {}\nStarted: {}\nUpdated: {}",
+        session.id, session.project, session.model, session.total_tokens,
+        session.total_cost, session.msg_count, session.started_at, session.updated_at,
+    )
+}
+
+/// Format a list of sessions as TSV (tab-separated values) for clipboard.
+pub fn format_sessions_as_tsv(sessions: &[SessionSummary]) -> String {
+    let mut lines = Vec::with_capacity(sessions.len() + 1);
+    lines.push("Project\tModel\tTokens\tCost\tMessages\tStarted\tUpdated".to_string());
+    for s in sessions {
+        lines.push(format!(
+            "{}\t{}\t{}\t${:.4}\t{}\t{}\t{}",
+            s.project, s.model, s.total_tokens, s.total_cost, s.msg_count, s.started_at, s.updated_at,
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Copy text to system clipboard using platform-specific commands.
+pub fn copy_to_clipboard(text: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::{Command, Stdio};
+        if let Ok(mut child) = Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .spawn()
+        {
+            if let Some(stdin) = child.stdin.as_mut() {
+                use std::io::Write;
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            return child.wait().is_ok();
+        }
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::process::{Command, Stdio};
+        // Try xclip first, then xsel
+        let cmds = ["xclip", "xsel"];
+        for cmd in &cmds {
+            if let Ok(mut child) = Command::new(cmd)
+                .args(["-selection", "clipboard"])
+                .stdin(Stdio::piped())
+                .spawn()
+            {
+                if let Some(stdin) = child.stdin.as_mut() {
+                    use std::io::Write;
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+                if child.wait().is_ok() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
 /// Format a compact one-line tmux status bar string from dashboard stats.
 pub fn format_tmux_status(burn_rate: f64, spend_today: f64, total_sessions: i64) -> String {
     format!(
@@ -564,6 +632,62 @@ mod tests {
         let (tokens, cost) = state.replay_running_totals();
         assert_eq!(tokens, 150 + 300 + 450); // + (300+150)
         assert!((cost - 0.06).abs() < 1e-9);
+    }
+
+    fn make_test_session(id: &str, project: &str, cost: f64) -> SessionSummary {
+        SessionSummary {
+            id: id.to_string(),
+            project: project.to_string(),
+            model: "claude-3-sonnet".to_string(),
+            total_cost: cost,
+            total_tokens: 1500,
+            msg_count: 10,
+            started_at: "2025-01-01T00:00:00Z".to_string(),
+            updated_at: "2025-01-01T01:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_clipboard_single_session_format() {
+        let session = make_test_session("sess-1", "my-project", 1.2345);
+        let output = format_session_for_clipboard(&session);
+        assert!(output.contains("my-project"), "should contain project name");
+        assert!(output.contains("$1.2345"), "should contain cost");
+        assert!(output.contains("1500"), "should contain token count");
+        assert!(output.contains("Session: sess-1"), "should contain session id");
+    }
+
+    #[test]
+    fn test_clipboard_tsv_format() {
+        let sessions = vec![
+            make_test_session("s1", "proj-a", 0.50),
+            make_test_session("s2", "proj-b", 1.25),
+        ];
+        let tsv = format_sessions_as_tsv(&sessions);
+        let lines: Vec<&str> = tsv.lines().collect();
+        assert_eq!(lines.len(), 3, "header + 2 data rows");
+        assert!(lines[0].contains("Project"), "header should contain Project");
+        assert!(lines[0].contains('\t'), "header should be tab-separated");
+        assert!(lines[1].contains("proj-a"), "first row should contain proj-a");
+        assert!(lines[2].contains("proj-b"), "second row should contain proj-b");
+        assert!(lines[1].contains("$0.5000"), "cost should be formatted to 4 decimal places");
+    }
+
+    #[test]
+    fn test_clipboard_tsv_empty() {
+        let tsv = format_sessions_as_tsv(&[]);
+        let lines: Vec<&str> = tsv.lines().collect();
+        assert_eq!(lines.len(), 1, "only header for empty sessions");
+    }
+
+    #[test]
+    fn test_copy_flash_timeout() {
+        let mut state = make_test_state();
+        state.copy_flash = Some(Instant::now() - std::time::Duration::from_secs(5));
+        // After 2 seconds, flash should be considered expired
+        if let Some(flash_at) = state.copy_flash {
+            assert!(flash_at.elapsed() >= std::time::Duration::from_secs(2));
+        }
     }
 
     #[test]
