@@ -58,11 +58,27 @@ pub fn render_session_detail(f: &mut Frame, state: &AppState, theme: &Theme) {
     };
     let output_pct = 1.0 - input_pct;
 
+    let title_text = if state.replay_active {
+        let pause_str = if state.replay_paused { "PAUSED " } else { "" };
+        let (tokens, cost) = state.replay_running_totals();
+        format!(
+            " REPLAY {}{}x | {}/{} msgs | {} tok | ${:.4} (Esc:exit Space:pause +/-:speed) ",
+            pause_str,
+            state.replay_speed,
+            state.replay_index + 1,
+            state.detail_messages.len(),
+            format_tokens(tokens),
+            cost,
+        )
+    } else {
+        " Session Detail (Esc to close, j/k to scroll, R:replay) ".to_string()
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent))
         .title(Span::styled(
-            " Session Detail (Esc to close, j/k to scroll) ",
+            title_text,
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -193,15 +209,28 @@ pub fn render_session_detail(f: &mut Frame, state: &AppState, theme: &Theme) {
         ),
     ]));
 
+    // In replay mode, show only messages up to replay_index
+    let visible_msg_slice = if state.replay_active {
+        let end = (state.replay_index + 1).min(messages.len());
+        &messages[..end]
+    } else {
+        messages
+    };
+
     // Scrollable message list
-    let max_cost = messages
+    let max_cost = visible_msg_slice
         .iter()
         .map(|m| m.cost_usd)
         .fold(0.0f64, f64::max);
 
     let available_height = (inner.height as usize).saturating_sub(lines.len());
-    let scroll = state.detail_scroll.min(messages.len().saturating_sub(1));
-    let visible_messages = messages.iter().enumerate().skip(scroll).take(available_height);
+    let scroll = if state.replay_active {
+        // Auto-scroll to keep current replay message visible
+        visible_msg_slice.len().saturating_sub(available_height)
+    } else {
+        state.detail_scroll.min(messages.len().saturating_sub(1))
+    };
+    let visible_messages = visible_msg_slice.iter().enumerate().skip(scroll).take(available_height);
 
     for (i, msg) in visible_messages {
         let time = msg.timestamp.get(11..16).unwrap_or("??:??");

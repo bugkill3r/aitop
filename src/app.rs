@@ -99,6 +99,12 @@ pub struct AppState {
     pub last_live_event: Option<Instant>,
     pub live_project: Option<String>,
 
+    // Session replay
+    pub replay_active: bool,
+    pub replay_index: usize,
+    pub replay_speed: u8,
+    pub replay_paused: bool,
+
     // Control
     pub should_quit: bool,
     pub needs_refresh: bool,
@@ -156,6 +162,11 @@ impl AppState {
 
             last_live_event: None,
             live_project: None,
+
+            replay_active: false,
+            replay_index: 0,
+            replay_speed: 1,
+            replay_paused: false,
 
             should_quit: false,
             needs_refresh: true,
@@ -302,6 +313,80 @@ impl AppState {
     pub fn sort_indicator(&self) -> &str {
         if self.sort_ascending { " \u{25B2}" } else { " \u{25BC}" }
     }
+
+    /// Enter replay mode for the current session detail.
+    pub fn start_replay(&mut self) {
+        if self.detail_session.is_some() && !self.detail_messages.is_empty() {
+            self.replay_active = true;
+            self.replay_index = 0;
+            self.replay_speed = 1;
+            self.replay_paused = false;
+        }
+    }
+
+    /// Exit replay mode.
+    pub fn stop_replay(&mut self) {
+        self.replay_active = false;
+        self.replay_index = 0;
+        self.replay_speed = 1;
+        self.replay_paused = false;
+    }
+
+    /// Toggle replay pause/resume.
+    pub fn toggle_replay_pause(&mut self) {
+        if self.replay_active {
+            self.replay_paused = !self.replay_paused;
+        }
+    }
+
+    /// Increase replay speed: 1 -> 2 -> 5 -> 10.
+    pub fn replay_speed_up(&mut self) {
+        if self.replay_active {
+            self.replay_speed = match self.replay_speed {
+                1 => 2,
+                2 => 5,
+                5 => 10,
+                _ => 10,
+            };
+        }
+    }
+
+    /// Decrease replay speed: 10 -> 5 -> 2 -> 1.
+    pub fn replay_speed_down(&mut self) {
+        if self.replay_active {
+            self.replay_speed = match self.replay_speed {
+                10 => 5,
+                5 => 2,
+                2 => 1,
+                _ => 1,
+            };
+        }
+    }
+
+    /// Advance replay by one message. Returns true if advanced, false if at end.
+    pub fn replay_advance(&mut self) -> bool {
+        if !self.replay_active || self.replay_paused {
+            return false;
+        }
+        if self.replay_index < self.detail_messages.len().saturating_sub(1) {
+            self.replay_index += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get running totals up to and including `replay_index`.
+    pub fn replay_running_totals(&self) -> (i64, f64) {
+        if !self.replay_active || self.detail_messages.is_empty() {
+            return (0, 0.0);
+        }
+        let end = (self.replay_index + 1).min(self.detail_messages.len());
+        let msgs = &self.detail_messages[..end];
+        let tokens: i64 = msgs.iter().map(|m| m.input_tokens + m.output_tokens).sum();
+        let cost: f64 = msgs.iter().map(|m| m.cost_usd).sum();
+        (tokens, cost)
+    }
 }
 
 /// Format a compact one-line tmux status bar string from dashboard stats.
@@ -331,5 +416,146 @@ mod tests {
         assert!(output.contains("$0.00/hr"));
         assert!(output.contains("$0.00 today"));
         assert!(output.contains("0 sessions"));
+    }
+
+    fn make_test_state() -> AppState {
+        let config = Config::default();
+        AppState::new(config)
+    }
+
+    fn make_test_messages(n: usize) -> Vec<crate::data::aggregator::SessionMessage> {
+        (0..n)
+            .map(|i| crate::data::aggregator::SessionMessage {
+                id: format!("msg-{}", i),
+                timestamp: format!("2025-01-01T{:02}:00:00Z", i),
+                model: "claude-3-sonnet".to_string(),
+                msg_type: if i % 2 == 0 { "human".to_string() } else { "assistant".to_string() },
+                input_tokens: 100 * (i as i64 + 1),
+                output_tokens: 50 * (i as i64 + 1),
+                cache_read: 0,
+                cache_creation: 0,
+                cost_usd: 0.01 * (i as f64 + 1.0),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_replay_start_requires_session() {
+        let mut state = make_test_state();
+        // No detail session - should not activate
+        state.start_replay();
+        assert!(!state.replay_active);
+
+        // With session but no messages - should not activate
+        state.detail_session = Some("session-1".to_string());
+        state.start_replay();
+        assert!(!state.replay_active);
+
+        // With session and messages - should activate
+        state.detail_messages = make_test_messages(5);
+        state.start_replay();
+        assert!(state.replay_active);
+        assert_eq!(state.replay_index, 0);
+        assert_eq!(state.replay_speed, 1);
+        assert!(!state.replay_paused);
+    }
+
+    #[test]
+    fn test_replay_advance() {
+        let mut state = make_test_state();
+        state.detail_session = Some("session-1".to_string());
+        state.detail_messages = make_test_messages(3);
+        state.start_replay();
+
+        assert!(state.replay_advance()); // 0 -> 1
+        assert_eq!(state.replay_index, 1);
+        assert!(state.replay_advance()); // 1 -> 2
+        assert_eq!(state.replay_index, 2);
+        assert!(!state.replay_advance()); // at end, no advance
+        assert_eq!(state.replay_index, 2);
+    }
+
+    #[test]
+    fn test_replay_pause_blocks_advance() {
+        let mut state = make_test_state();
+        state.detail_session = Some("session-1".to_string());
+        state.detail_messages = make_test_messages(5);
+        state.start_replay();
+
+        state.toggle_replay_pause();
+        assert!(state.replay_paused);
+        assert!(!state.replay_advance()); // blocked
+        assert_eq!(state.replay_index, 0);
+
+        state.toggle_replay_pause();
+        assert!(!state.replay_paused);
+        assert!(state.replay_advance()); // unblocked
+        assert_eq!(state.replay_index, 1);
+    }
+
+    #[test]
+    fn test_replay_speed_changes() {
+        let mut state = make_test_state();
+        state.detail_session = Some("session-1".to_string());
+        state.detail_messages = make_test_messages(5);
+        state.start_replay();
+
+        assert_eq!(state.replay_speed, 1);
+        state.replay_speed_up();
+        assert_eq!(state.replay_speed, 2);
+        state.replay_speed_up();
+        assert_eq!(state.replay_speed, 5);
+        state.replay_speed_up();
+        assert_eq!(state.replay_speed, 10);
+        state.replay_speed_up();
+        assert_eq!(state.replay_speed, 10); // capped
+
+        state.replay_speed_down();
+        assert_eq!(state.replay_speed, 5);
+        state.replay_speed_down();
+        assert_eq!(state.replay_speed, 2);
+        state.replay_speed_down();
+        assert_eq!(state.replay_speed, 1);
+        state.replay_speed_down();
+        assert_eq!(state.replay_speed, 1); // capped
+    }
+
+    #[test]
+    fn test_replay_running_totals() {
+        let mut state = make_test_state();
+        state.detail_session = Some("session-1".to_string());
+        state.detail_messages = make_test_messages(3);
+        state.start_replay();
+
+        // At index 0: first message only
+        let (tokens, cost) = state.replay_running_totals();
+        assert_eq!(tokens, 150); // 100 + 50
+        assert!((cost - 0.01).abs() < 1e-9);
+
+        state.replay_advance(); // index 1
+        let (tokens, cost) = state.replay_running_totals();
+        assert_eq!(tokens, 150 + 300); // (100+50) + (200+100)
+        assert!((cost - 0.03).abs() < 1e-9);
+
+        state.replay_advance(); // index 2
+        let (tokens, cost) = state.replay_running_totals();
+        assert_eq!(tokens, 150 + 300 + 450); // + (300+150)
+        assert!((cost - 0.06).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_replay_stop() {
+        let mut state = make_test_state();
+        state.detail_session = Some("session-1".to_string());
+        state.detail_messages = make_test_messages(5);
+        state.start_replay();
+        state.replay_advance();
+        state.replay_speed_up();
+
+        state.stop_replay();
+        assert!(!state.replay_active);
+        assert_eq!(state.replay_index, 0);
+        assert_eq!(state.replay_speed, 1);
+        assert!(!state.replay_paused);
     }
 }

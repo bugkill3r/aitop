@@ -234,6 +234,7 @@ fn run_event_loop(
     watcher_rx: &mpsc::Receiver<String>,
 ) -> Result<()> {
     let mut last_refresh = Instant::now();
+    let mut last_replay_tick = Instant::now();
     let max_refresh_interval = Duration::from_secs(30);
     let debounce_interval = Duration::from_millis(500);
 
@@ -275,6 +276,15 @@ fn run_event_loop(
         }
 
         state.check_banner_timeout();
+
+        // Replay auto-advance
+        if state.replay_active && !state.replay_paused {
+            let replay_interval = Duration::from_millis(1000 / state.replay_speed as u64);
+            if last_replay_tick.elapsed() >= replay_interval {
+                state.replay_advance();
+                last_replay_tick = Instant::now();
+            }
+        }
 
         let timeout = Duration::from_millis(100);
         if event::poll(timeout)? {
@@ -331,6 +341,11 @@ fn handle_key(
 
     if state.filter_active {
         handle_filter_key(state, key);
+        return;
+    }
+
+    if state.replay_active {
+        handle_replay_key(state, key);
         return;
     }
 
@@ -421,6 +436,19 @@ fn handle_detail_key(state: &mut AppState, key: event::KeyEvent) {
         KeyCode::Up | KeyCode::Char('k') => {
             state.detail_scroll = state.detail_scroll.saturating_sub(1);
         }
+        KeyCode::Char('R') => {
+            state.start_replay();
+        }
+        _ => {}
+    }
+}
+
+fn handle_replay_key(state: &mut AppState, key: event::KeyEvent) {
+    match key.code {
+        KeyCode::Esc => state.stop_replay(),
+        KeyCode::Char(' ') => state.toggle_replay_pause(),
+        KeyCode::Char('+') | KeyCode::Char('=') => state.replay_speed_up(),
+        KeyCode::Char('-') => state.replay_speed_down(),
         _ => {}
     }
 }
