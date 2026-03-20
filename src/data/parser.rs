@@ -163,6 +163,34 @@ pub fn parse_jsonl_line(
     }
 }
 
+/// Parse all JSONL lines from file content (from a given offset), returning parsed data.
+/// This is a pure function with no DB I/O, suitable for parallel execution.
+pub fn parse_file_content(
+    content: &[u8],
+    offset: u64,
+    project: &str,
+    pricing: &PricingRegistry,
+) -> Vec<(Option<ParsedSession>, Option<ParsedMessage>)> {
+    if (offset as usize) >= content.len() {
+        return Vec::new();
+    }
+
+    let new_content = &content[offset as usize..];
+    let text = String::from_utf8_lossy(new_content);
+    let mut results = Vec::new();
+
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(parsed) = parse_jsonl_line(line, project, pricing) {
+            results.push(parsed);
+        }
+    }
+
+    results
+}
+
 /// Decode project directory name to human-readable project name.
 /// e.g., "-Users-saurabh-Dev-echopad" -> "echopad"
 pub fn decode_project_name(dir_name: &str) -> String {
@@ -178,6 +206,20 @@ pub fn decode_project_name(dir_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_user_line(uuid: &str, session_id: &str) -> String {
+        format!(
+            r#"{{"uuid":"{}","sessionId":"{}","type":"user","timestamp":"2025-01-01T00:00:00Z","message":{{"role":"user"}}}}"#,
+            uuid, session_id
+        )
+    }
+
+    fn make_assistant_line(uuid: &str, session_id: &str) -> String {
+        format!(
+            r#"{{"uuid":"{}","sessionId":"{}","type":"assistant","timestamp":"2025-01-01T00:01:00Z","message":{{"role":"assistant","model":"claude-3-5-sonnet-20241022","usage":{{"input_tokens":100,"output_tokens":200}}}}}}"#,
+            uuid, session_id
+        )
+    }
 
     #[test]
     fn test_decode_project_name() {
@@ -251,5 +293,116 @@ mod tests {
         let result = parse_jsonl_line(line, "testproject", &pricing).unwrap();
         let (_, msg) = result;
         assert_eq!(msg.unwrap().provider, "claude");
+    }
+
+    #[test]
+    fn test_parse_file_content_empty() {
+        let pricing = PricingRegistry::builtin();
+        let results = parse_file_content(b"", 0, "test", &pricing);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_parse_file_content_offset_past_end() {
+        let pricing = PricingRegistry::builtin();
+        let content = b"some content";
+        let results = parse_file_content(content, 100, "test", &pricing);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_parse_file_content_single_line() {
+        let pricing = PricingRegistry::builtin();
+        let line = make_user_line("uuid1", "session1");
+        let results = parse_file_content(line.as_bytes(), 0, "myproject", &pricing);
+        assert_eq!(results.len(), 1);
+        let (session, msg) = &results[0];
+        assert!(session.is_some());
+        assert!(msg.is_some());
+        assert_eq!(msg.as_ref().unwrap().session_id, "session1");
+        assert_eq!(msg.as_ref().unwrap().project, "myproject");
+    }
+
+    #[test]
+    fn test_parse_file_content_multiple_lines() {
+        let pricing = PricingRegistry::builtin();
+        let content = format!(
+            "{}\n{}\n",
+            make_user_line("u1", "s1"),
+            make_assistant_line("u2", "s1")
+        );
+        let results = parse_file_content(content.as_bytes(), 0, "proj", &pricing);
+        assert_eq!(results.len(), 2);
+        // First line: user message with session
+        assert!(results[0].0.is_some());
+        // Second line: assistant message without session
+        assert!(results[1].0.is_none());
+        assert!(results[1].1.is_some());
+        let msg = results[1].1.as_ref().unwrap();
+        assert_eq!(msg.input_tokens, 100);
+        assert_eq!(msg.output_tokens, 200);
+        assert!(msg.cost_usd > 0.0);
+    }
+
+    #[test]
+    fn test_parse_file_content_with_offset() {
+        let pricing = PricingRegistry::builtin();
+        let line1 = make_user_line("u1", "s1");
+        let line2 = make_assistant_line("u2", "s1");
+        let content = format!("{}\n{}\n", line1, line2);
+        let offset = (line1.len() + 1) as u64; // skip first line + newline
+        let results = parse_file_content(content.as_bytes(), offset, "proj", &pricing);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1.is_some());
+        assert_eq!(results[0].1.as_ref().unwrap().msg_type, "assistant");
+    }
+
+    #[test]
+    fn test_parse_file_content_skips_blank_lines() {
+        let pricing = PricingRegistry::builtin();
+        let content = format!("\n\n{}\n\n", make_user_line("u1", "s1"));
+        let results = parse_file_content(content.as_bytes(), 0, "proj", &pricing);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_file_content_parallel_matches_sequential() {
+        use rayon::prelude::*;
+
+        let pricing = PricingRegistry::builtin();
+
+        // Create multiple "files" (byte slices)
+        let files: Vec<(String, &str)> = (0..10)
+            .map(|i| {
+                let content = format!(
+                    "{}\n{}\n",
+                    make_user_line(&format!("u{i}a"), &format!("s{i}")),
+                    make_assistant_line(&format!("u{i}b"), &format!("s{i}"))
+                );
+                (content, "project")
+            })
+            .collect();
+
+        // Sequential parse
+        let sequential: Vec<_> = files
+            .iter()
+            .flat_map(|(content, project)| parse_file_content(content.as_bytes(), 0, project, &pricing))
+            .collect();
+
+        // Parallel parse
+        let parallel: Vec<_> = files
+            .par_iter()
+            .flat_map(|(content, project)| parse_file_content(content.as_bytes(), 0, project, &pricing))
+            .collect();
+
+        // Same number of results
+        assert_eq!(sequential.len(), parallel.len());
+        assert_eq!(sequential.len(), 20); // 2 per file * 10 files
+
+        // Both should produce sessions for user messages and messages for all
+        let seq_sessions: usize = sequential.iter().filter(|(s, _)| s.is_some()).count();
+        let par_sessions: usize = parallel.iter().filter(|(s, _)| s.is_some()).count();
+        assert_eq!(seq_sessions, par_sessions);
+        assert_eq!(seq_sessions, 10); // one session per file
     }
 }

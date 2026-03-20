@@ -199,6 +199,61 @@ impl Database {
         Ok(())
     }
 
+    /// Write pre-parsed results to the database.
+    /// Used with parallel parsing: parsing is done in parallel, then results are written sequentially.
+    pub fn write_parsed_results(
+        &self,
+        file: &SessionFile,
+        new_offset: u64,
+        results: &[(Option<super::parser::ParsedSession>, Option<super::parser::ParsedMessage>)],
+    ) -> Result<()> {
+        let path_str = file.path.to_string_lossy().to_string();
+        let tx = self.conn.unchecked_transaction()?;
+
+        for (session, message) in results {
+            if let Some(s) = session {
+                tx.execute(
+                    "INSERT INTO sessions (id, project, started_at, updated_at, model, version)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(id) DO UPDATE SET
+                        updated_at = MAX(sessions.updated_at, ?4),
+                        model = COALESCE(?5, sessions.model),
+                        version = COALESCE(?6, sessions.version)",
+                    params![s.id, s.project, s.started_at, s.updated_at, s.model, s.version],
+                )?;
+            }
+            if let Some(m) = message {
+                if let Some(ref model) = m.model {
+                    tx.execute(
+                        "UPDATE sessions SET model = ?1, updated_at = MAX(updated_at, ?2) WHERE id = ?3",
+                        params![model, m.timestamp, m.session_id],
+                    )?;
+                }
+                tx.execute(
+                    "INSERT OR IGNORE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd],
+                )?;
+            }
+        }
+
+        let mtime = std::fs::metadata(&file.path)?
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .to_string();
+
+        tx.execute(
+            "INSERT INTO file_index (path, last_offset, last_mtime) VALUES (?1, ?2, ?3)
+             ON CONFLICT(path) DO UPDATE SET last_offset = ?2, last_mtime = ?3",
+            params![path_str, new_offset as i64, mtime],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Ingest a JSONL file by its raw path string.
     /// Derives session_id and project from the path structure.
     /// Returns the project name (for live indicator) and new offset.

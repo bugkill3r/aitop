@@ -122,6 +122,13 @@ pub struct EfficiencyStats {
     pub cache_savings_usd: f64,
 }
 
+/// Daily token count for the token overlay in trends.
+#[derive(Debug, Clone)]
+pub struct DailyTokenCount {
+    pub date: String,
+    pub total_tokens: i64,
+}
+
 /// Contribution calendar day.
 #[derive(Debug, Clone)]
 pub struct ContributionDay {
@@ -275,6 +282,27 @@ impl Aggregator {
                 total_tokens: row.get(6)?,
                 msg_count: row.get(7)?,
                 provider: row.get(8)?,
+            })
+        })?;
+
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Daily total tokens for the token overlay chart.
+    pub fn daily_tokens(&self, days: i32) -> Result<Vec<DailyTokenCount>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT date(timestamp) as day, SUM(input_tokens + output_tokens)
+             FROM messages
+             WHERE timestamp > datetime('now', ?1)
+             GROUP BY day
+             ORDER BY day",
+        )?;
+
+        let range = format!("-{} days", days);
+        let rows = stmt.query_map(params![range], |row| {
+            Ok(DailyTokenCount {
+                date: row.get(0)?,
+                total_tokens: row.get(1)?,
             })
         })?;
 

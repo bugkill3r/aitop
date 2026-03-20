@@ -39,6 +39,8 @@ fn render_chart(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::l
         ChartType::Bar => "bar",
     };
 
+    let overlay_label = if state.show_token_overlay { " [tokens ON]" } else { "" };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.muted))
@@ -46,6 +48,7 @@ fn render_chart(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::l
             Span::styled("T", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
             Span::styled("rends ", Style::default().fg(theme.text)),
             Span::styled(format!("({}, {}) ", range_label, chart_label), Style::default().fg(theme.text_dim)),
+            Span::styled(overlay_label, Style::default().fg(theme.secondary)),
             Span::styled("  ", Style::default()),
             Span::styled("w", Style::default().fg(theme.tertiary).add_modifier(Modifier::UNDERLINED)),
             Span::styled("eek ", Style::default().fg(theme.text_dim)),
@@ -56,6 +59,10 @@ fn render_chart(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::l
             Span::styled("ll ", Style::default().fg(theme.text_dim)),
             Span::styled("b", Style::default().fg(theme.tertiary).add_modifier(Modifier::UNDERLINED)),
             Span::styled("ar/line ", Style::default().fg(theme.text_dim)),
+            Span::styled("n", Style::default().fg(theme.tertiary).add_modifier(Modifier::UNDERLINED)),
+            Span::styled("toks ", Style::default().fg(theme.text_dim)),
+            Span::styled("\u{2190}\u{2192}", Style::default().fg(theme.tertiary)),
+            Span::styled(" cycle ", Style::default().fg(theme.text_dim)),
         ]));
 
     if state.daily_spend.is_empty() {
@@ -99,13 +106,55 @@ fn render_chart(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::l
                 vec![Span::styled("today", Style::default().fg(theme.text_dim))]
             };
 
-            let dataset = Dataset::default()
+            let cost_dataset = Dataset::default()
+                .name("Cost ($)")
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(theme.accent))
                 .data(&data_points);
 
-            let chart = Chart::new(vec![dataset])
+            // Optionally add token overlay dataset
+            let (token_data, max_tokens) = prepare_token_overlay(&state.daily_spend, &state.daily_tokens);
+
+            // Normalize tokens to fit on the cost y-axis
+            let normalized_token_data: Vec<(f64, f64)> = if state.show_token_overlay && max_tokens > 0.0 {
+                token_data
+                    .iter()
+                    .map(|&(x, t)| (x, t / max_tokens * y_max))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            let mut datasets = vec![cost_dataset];
+
+            if state.show_token_overlay && !normalized_token_data.is_empty() {
+                let token_dataset = Dataset::default()
+                    .name("Tokens")
+                    .marker(symbols::Marker::Braille)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(theme.secondary))
+                    .data(&normalized_token_data);
+                datasets.push(token_dataset);
+            }
+
+            let mut y_labels = vec![
+                Span::styled("$0", Style::default().fg(theme.text_dim)),
+                Span::styled(
+                    format!("${:.0}", y_max),
+                    Style::default().fg(theme.text_dim),
+                ),
+            ];
+
+            if state.show_token_overlay {
+                // Add a note about the right axis scale in the top label
+                y_labels[1] = Span::styled(
+                    format!("${:.0} | {}", y_max, format_tokens_short(max_tokens as i64)),
+                    Style::default().fg(theme.text_dim),
+                );
+            }
+
+            let chart = Chart::new(datasets)
                 .block(block)
                 .x_axis(
                     Axis::default()
@@ -115,13 +164,7 @@ fn render_chart(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::l
                 .y_axis(
                     Axis::default()
                         .bounds([0.0, y_max])
-                        .labels(vec![
-                            Span::styled("$0", Style::default().fg(theme.text_dim)),
-                            Span::styled(
-                                format!("${:.0}", y_max),
-                                Style::default().fg(theme.text_dim),
-                            ),
-                        ]),
+                        .labels(y_labels),
                 );
 
             f.render_widget(chart, area);
@@ -213,6 +256,16 @@ fn render_bar_chart(
     lines.push(Line::from(label_spans));
 
     f.render_widget(Paragraph::new(lines), area);
+}
+
+fn format_tokens_short(n: i64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}Mtok", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.0}Ktok", n as f64 / 1_000.0)
+    } else {
+        format!("{}tok", n)
+    }
 }
 
 fn render_heatmap(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::layout::Rect) {
@@ -414,6 +467,40 @@ fn percentile(sorted: &[f64], p: usize) -> f64 {
     sorted[idx.min(sorted.len() - 1)]
 }
 
+/// Prepare token overlay data aligned with cost data by date.
+/// Returns chart data points and max token count.
+pub fn prepare_token_overlay(
+    daily_spend: &[crate::data::aggregator::DailySpend],
+    daily_tokens: &[crate::data::aggregator::DailyTokenCount],
+) -> (Vec<(f64, f64)>, f64) {
+    if daily_spend.is_empty() || daily_tokens.is_empty() {
+        return (vec![(0.0, 0.0)], 1.0);
+    }
+
+    // Build a lookup from date to token count
+    let token_map: std::collections::HashMap<&str, i64> = daily_tokens
+        .iter()
+        .map(|t| (t.date.as_str(), t.total_tokens))
+        .collect();
+
+    let data: Vec<(f64, f64)> = daily_spend
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            let tokens = token_map.get(d.date.as_str()).copied().unwrap_or(0);
+            (i as f64, tokens as f64)
+        })
+        .collect();
+
+    let max_tokens = data
+        .iter()
+        .map(|&(_, t)| t)
+        .fold(0.0f64, f64::max)
+        .max(1.0);
+
+    (data, max_tokens)
+}
+
 fn render_stats(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::layout::Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -466,4 +553,75 @@ fn render_stats(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::l
 
     f.render_widget(left, cols[0]);
     f.render_widget(Paragraph::new(right_lines), cols[1]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::aggregator::{DailySpend, DailyTokenCount};
+
+    #[test]
+    fn test_prepare_token_overlay_empty_spend() {
+        let (data, max) = prepare_token_overlay(&[], &[]);
+        assert_eq!(data.len(), 1);
+        assert_eq!(max, 1.0);
+    }
+
+    #[test]
+    fn test_prepare_token_overlay_empty_tokens() {
+        let spend = vec![DailySpend { date: "2025-01-01".into(), cost: 5.0 }];
+        let (data, max) = prepare_token_overlay(&spend, &[]);
+        assert_eq!(data.len(), 1);
+        assert_eq!(max, 1.0);
+    }
+
+    #[test]
+    fn test_prepare_token_overlay_aligned() {
+        let spend = vec![
+            DailySpend { date: "2025-01-01".into(), cost: 5.0 },
+            DailySpend { date: "2025-01-02".into(), cost: 10.0 },
+        ];
+        let tokens = vec![
+            DailyTokenCount { date: "2025-01-01".into(), total_tokens: 1000 },
+            DailyTokenCount { date: "2025-01-02".into(), total_tokens: 2000 },
+        ];
+        let (data, max) = prepare_token_overlay(&spend, &tokens);
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0], (0.0, 1000.0));
+        assert_eq!(data[1], (1.0, 2000.0));
+        assert_eq!(max, 2000.0);
+    }
+
+    #[test]
+    fn test_prepare_token_overlay_missing_date() {
+        let spend = vec![
+            DailySpend { date: "2025-01-01".into(), cost: 5.0 },
+            DailySpend { date: "2025-01-02".into(), cost: 10.0 },
+            DailySpend { date: "2025-01-03".into(), cost: 8.0 },
+        ];
+        let tokens = vec![
+            DailyTokenCount { date: "2025-01-01".into(), total_tokens: 1000 },
+            // 2025-01-02 missing
+            DailyTokenCount { date: "2025-01-03".into(), total_tokens: 3000 },
+        ];
+        let (data, max) = prepare_token_overlay(&spend, &tokens);
+        assert_eq!(data.len(), 3);
+        assert_eq!(data[1].1, 0.0); // missing date => 0 tokens
+        assert_eq!(max, 3000.0);
+    }
+
+    #[test]
+    fn test_format_tokens_short_millions() {
+        assert_eq!(format_tokens_short(1_500_000), "1.5Mtok");
+    }
+
+    #[test]
+    fn test_format_tokens_short_thousands() {
+        assert_eq!(format_tokens_short(42_000), "42Ktok");
+    }
+
+    #[test]
+    fn test_format_tokens_short_small() {
+        assert_eq!(format_tokens_short(500), "500tok");
+    }
 }

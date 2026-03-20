@@ -9,6 +9,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use rayon::prelude::*;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -86,15 +87,51 @@ fn main() -> Result<()> {
 
     let total_files = claude_files.len() + gemini_files.len() + openclaw_files.len();
     if total_files > 0 {
+        eprint!("\r  Indexing sessions... (parsing {} files)", total_files);
+        io::stderr().flush().ok();
+
+        // Phase 1: Parse Claude files in parallel using rayon
+        let file_offsets: Vec<_> = claude_files
+            .iter()
+            .map(|file| {
+                let path_str = file.path.to_string_lossy().to_string();
+                db.get_file_offset(&path_str).unwrap_or(0)
+            })
+            .collect();
+
+        let parsed_files: Vec<_> = claude_files
+            .par_iter()
+            .zip(file_offsets.par_iter())
+            .filter_map(|(file, &offset)| {
+                let content = std::fs::read(&file.path).ok()?;
+                if (offset as usize) >= content.len() {
+                    return None; // already up to date
+                }
+                let results = aitop::data::parser::parse_file_content(&content, offset, &file.project, &pricing);
+                if results.is_empty() {
+                    return None;
+                }
+                Some((file, content.len() as u64, results))
+            })
+            .collect();
+
+        // Phase 2: Write Claude results to DB sequentially (SQLite single-writer constraint)
         let mut count = 0;
-        for file in &claude_files {
+        for (file, new_offset, results) in &parsed_files {
             count += 1;
-            eprint!("\r  Indexing sessions... ({}/{} files)", count, total_files);
+            eprint!(
+                "\r  Indexing sessions... ({}/{} files)",
+                count,
+                total_files
+            );
             io::stderr().flush().ok();
-            if let Err(e) = db.ingest_file(file) {
-                eprintln!("\nWarning: failed to ingest {:?}: {}", file.path, e);
+
+            if let Err(e) = db.write_parsed_results(file, *new_offset, results) {
+                eprintln!("\nWarning: failed to write {:?}: {}", file.path, e);
             }
         }
+
+        // Ingest Gemini files sequentially
         for file in &gemini_files {
             count += 1;
             eprint!("\r  Indexing sessions... ({}/{} files)", count, total_files);
@@ -103,6 +140,8 @@ fn main() -> Result<()> {
                 eprintln!("\nWarning: failed to ingest Gemini {:?}: {}", file.path, e);
             }
         }
+
+        // Ingest OpenClaw files sequentially
         for file in &openclaw_files {
             count += 1;
             eprint!("\r  Indexing sessions... ({}/{} files)", count, total_files);
@@ -111,6 +150,7 @@ fn main() -> Result<()> {
                 eprintln!("\nWarning: failed to ingest OpenClaw {:?}: {}", file.path, e);
             }
         }
+
         eprint!("\r{}\r", " ".repeat(60));
         io::stderr().flush().ok();
     }
@@ -303,6 +343,7 @@ fn run_event_loop(
             break;
         }
 
+        state.advance_pulse();
         state.check_banner_timeout();
 
         let timeout = Duration::from_millis(100);
@@ -527,6 +568,9 @@ fn handle_trends_key(state: &mut AppState, key: event::KeyEvent) {
             state.trend_range = TrendRange::All;
             state.needs_refresh = true;
         }
+        KeyCode::Char('n') => {
+            state.show_token_overlay = !state.show_token_overlay;
+        }
         KeyCode::Left => {
             state.trend_range = match state.trend_range {
                 TrendRange::Month => TrendRange::Week,
@@ -567,15 +611,16 @@ fn render_tab_bar(
     ];
 
     let (is_live, status_text) = state.live_status();
+    let pulse_char = state.pulse_indicator();
     let live_indicator = if is_live {
         let project_label = state.live_project.as_deref().unwrap_or("");
         if project_label.is_empty() {
-            format!(" \u{25CF} {} ", status_text)
+            format!(" {} {} ", pulse_char, status_text)
         } else {
-            format!(" \u{25CF} {} {} ", status_text, project_label)
+            format!(" {} {} {} ", pulse_char, status_text, project_label)
         }
     } else {
-        format!(" \u{25CB} {} ", status_text)
+        format!(" {} {} ", pulse_char, status_text)
     };
 
     let live_style = if is_live {
@@ -636,7 +681,7 @@ fn render_status_bar(
             View::Dashboard => "d:dashboard  s:sessions  m:models  t:trends  ?:help  p:theme".to_string(),
             View::Sessions => "j/k:navigate  c:cost  n:tokens  p:project  u:updated  /:filter  ?:help".to_string(),
             View::Models => "d:dashboard  s:sessions  t:trends  p:theme  ?:help".to_string(),
-            View::Trends => "w:week  o:month  a:all  \u{2190}\u{2192}:cycle  p:theme  ?:help".to_string(),
+            View::Trends => "w:week  o:month  a:all  b:bar/line  n:tokens  \u{2190}\u{2192}:cycle  p:theme  ?:help".to_string(),
         }
     };
 
