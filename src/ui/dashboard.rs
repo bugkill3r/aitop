@@ -4,13 +4,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Row, Sparkline, Table};
 use ratatui::Frame;
 
-use super::layout::{dashboard_layout, is_wide};
+use super::layout::{dashboard_layout, layout_tier, LayoutTier};
 use super::theme::Theme;
 use super::widgets::cost_color::cost_color;
 use crate::app::AppState;
 
 pub fn render_dashboard(f: &mut Frame, state: &AppState, theme: &Theme) {
-    let wide = is_wide(f.area());
+    let tier = layout_tier(f.area());
 
     // If we have a delta banner, render it above the dashboard
     let content_area = if state.delta_banner.is_some() {
@@ -24,7 +24,7 @@ pub fn render_dashboard(f: &mut Frame, state: &AppState, theme: &Theme) {
         state.content_area
     };
 
-    let areas = dashboard_layout(content_area, wide);
+    let areas = dashboard_layout(content_area, tier);
 
     if areas.metrics.height > 0 && areas.metrics.width > 0 {
         render_metrics(f, state, theme, areas.metrics);
@@ -35,7 +35,7 @@ pub fn render_dashboard(f: &mut Frame, state: &AppState, theme: &Theme) {
     if areas.model_breakdown.height > 0 && areas.model_breakdown.width > 0 {
         render_model_breakdown(f, state, theme, areas.model_breakdown);
     }
-    if areas.sessions.width > 0 && areas.sessions.height > 0 && wide {
+    if areas.sessions.width > 0 && areas.sessions.height > 0 && tier != LayoutTier::Compact {
         render_active_sessions(f, state, theme, areas.sessions);
     }
     if areas.activity.height > 0 && areas.activity.width > 0 {
