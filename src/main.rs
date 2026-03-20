@@ -332,6 +332,9 @@ fn run_event_loop(
             state.refresh_data(agg);
             last_refresh = Instant::now();
         }
+
+        // Check budget notifications after data refresh
+        state.check_budget_notifications();
     }
 
     Ok(())

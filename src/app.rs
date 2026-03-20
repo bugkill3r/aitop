@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use ratatui::layout::Rect;
@@ -106,6 +106,9 @@ pub struct AppState {
     // Clipboard flash
     pub copy_flash: Option<Instant>,
 
+    // Budget notification tracking
+    pub notified_thresholds: HashSet<u8>,
+
     // Session replay
     pub replay_active: bool,
     pub replay_index: usize,
@@ -174,6 +177,8 @@ impl AppState {
             split_view: None,
 
             copy_flash: None,
+
+            notified_thresholds: HashSet::new(),
 
             replay_active: false,
             replay_index: 0,
@@ -326,6 +331,34 @@ impl AppState {
         if self.sort_ascending { " \u{25B2}" } else { " \u{25BC}" }
     }
 
+    /// Check budget thresholds and send notifications for newly crossed ones.
+    /// Returns the list of newly notified thresholds (for testing).
+    pub fn check_budget_notifications(&mut self) -> Vec<u8> {
+        let budget = match self.config.budget {
+            Some(b) if b > 0.0 => b,
+            _ => return Vec::new(),
+        };
+
+        let new_thresholds = check_budget_thresholds(
+            budget,
+            self.dashboard.spend_today,
+            &self.notified_thresholds,
+        );
+
+        for &threshold in &new_thresholds {
+            let msg = format!(
+                "Spend today: ${:.2} ({:.0}% of ${:.2} budget)",
+                self.dashboard.spend_today,
+                self.dashboard.spend_today / budget * 100.0,
+                budget,
+            );
+            send_desktop_notification("aitop Budget Alert", &msg);
+            self.notified_thresholds.insert(threshold);
+        }
+
+        new_thresholds
+    }
+
     /// Toggle split mode on/off.
     pub fn toggle_split(&mut self) {
         self.split_mode = !self.split_mode;
@@ -414,6 +447,52 @@ impl AppState {
         let tokens: i64 = msgs.iter().map(|m| m.input_tokens + m.output_tokens).sum();
         let cost: f64 = msgs.iter().map(|m| m.cost_usd).sum();
         (tokens, cost)
+    }
+}
+
+/// Budget threshold percentages to check for notifications.
+const BUDGET_THRESHOLDS: &[u8] = &[50, 75, 90, 100];
+
+/// Determine which budget thresholds have been crossed based on current spend.
+/// Returns thresholds that are newly crossed (not already in `already_notified`).
+pub fn check_budget_thresholds(
+    budget: f64,
+    current_spend: f64,
+    already_notified: &HashSet<u8>,
+) -> Vec<u8> {
+    if budget <= 0.0 {
+        return Vec::new();
+    }
+    let pct = (current_spend / budget * 100.0) as u8;
+    BUDGET_THRESHOLDS
+        .iter()
+        .filter(|&&threshold| pct >= threshold && !already_notified.contains(&threshold))
+        .copied()
+        .collect()
+}
+
+/// Send a desktop notification using platform-specific commands.
+pub fn send_desktop_notification(title: &str, message: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let script = format!(
+            "display notification \"{}\" with title \"{}\"",
+            message.replace('"', "\\\""),
+            title.replace('"', "\\\""),
+        );
+        Command::new("osascript")
+            .args(["-e", &script])
+            .output()
+            .is_ok()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::process::Command;
+        Command::new("notify-send")
+            .args([title, message])
+            .output()
+            .is_ok()
     }
 }
 
@@ -632,6 +711,79 @@ mod tests {
         let (tokens, cost) = state.replay_running_totals();
         assert_eq!(tokens, 150 + 300 + 450); // + (300+150)
         assert!((cost - 0.06).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_budget_threshold_detection_no_budget() {
+        let notified = HashSet::new();
+        let result = check_budget_thresholds(0.0, 10.0, &notified);
+        assert!(result.is_empty(), "no thresholds when budget is 0");
+    }
+
+    #[test]
+    fn test_budget_threshold_detection_below_first() {
+        let notified = HashSet::new();
+        let result = check_budget_thresholds(100.0, 40.0, &notified);
+        assert!(result.is_empty(), "no thresholds at 40% of budget");
+    }
+
+    #[test]
+    fn test_budget_threshold_detection_at_50() {
+        let notified = HashSet::new();
+        let result = check_budget_thresholds(100.0, 50.0, &notified);
+        assert_eq!(result, vec![50], "should trigger 50% threshold");
+    }
+
+    #[test]
+    fn test_budget_threshold_detection_at_80() {
+        let notified = HashSet::new();
+        let result = check_budget_thresholds(100.0, 80.0, &notified);
+        assert_eq!(result, vec![50, 75], "should trigger 50% and 75% thresholds");
+    }
+
+    #[test]
+    fn test_budget_threshold_detection_at_100() {
+        let notified = HashSet::new();
+        let result = check_budget_thresholds(100.0, 100.0, &notified);
+        assert_eq!(result, vec![50, 75, 90, 100], "should trigger all thresholds");
+    }
+
+    #[test]
+    fn test_budget_threshold_no_duplicates() {
+        let mut notified = HashSet::new();
+        notified.insert(50);
+        notified.insert(75);
+        let result = check_budget_thresholds(100.0, 95.0, &notified);
+        assert_eq!(result, vec![90], "should only trigger new thresholds");
+    }
+
+    #[test]
+    fn test_budget_notification_state_machine() {
+        let mut state = make_test_state();
+        state.config.budget = Some(100.0);
+
+        // Below any threshold
+        state.dashboard.spend_today = 30.0;
+        let result = state.check_budget_notifications();
+        assert!(result.is_empty());
+        assert!(state.notified_thresholds.is_empty());
+
+        // Cross 50%
+        state.dashboard.spend_today = 55.0;
+        let result = state.check_budget_notifications();
+        assert_eq!(result, vec![50]);
+        assert!(state.notified_thresholds.contains(&50));
+
+        // Still at 55%, no new notifications
+        let result = state.check_budget_notifications();
+        assert!(result.is_empty());
+
+        // Cross 75% and 90%
+        state.dashboard.spend_today = 92.0;
+        let result = state.check_budget_notifications();
+        assert!(result.contains(&75));
+        assert!(result.contains(&90));
+        assert!(!result.contains(&50), "50 already notified");
     }
 
     fn make_test_session(id: &str, project: &str, cost: f64) -> SessionSummary {
