@@ -5,21 +5,18 @@
 
 **btop for AI** — a terminal dashboard for monitoring AI token usage, costs, and sessions.
 
-![Dashboard](docs/screenshots/dashboard.png)
+![Dashboard](assets/screenshot-dashboard.png)
 
-Like `btop` monitors your system resources, `aitop` monitors your AI spend. Built for developers who live in the terminal and want to keep an eye on their Claude Code (and eventually other AI) costs without leaving it.
+Like `btop` monitors your system resources, `aitop` monitors your AI spend. Built for developers who live in the terminal and want to keep an eye on their Claude Code, Gemini CLI, and OpenClaw costs without leaving it.
 
 <details>
 <summary>More screenshots</summary>
 
 ### Sessions
-![Sessions](docs/screenshots/sessions.png)
-
-### Models
-![Models](docs/screenshots/models.png)
+![Sessions](assets/screenshot-sessions.png)
 
 ### Trends
-![Trends](docs/screenshots/trends.png)
+![Trends](assets/screenshot-trends.png)
 
 </details>
 
@@ -27,7 +24,8 @@ Like `btop` monitors your system resources, `aitop` monitors your AI spend. Buil
 
 - **Live TUI dashboard** with btop-style keyboard shortcuts and highlighted shortcut letters
 - **4 views**: Dashboard, Sessions, Models, Trends — switch with `d`/`s`/`m`/`t`
-- **Zero auth required** — reads Claude Code's local JSONL session files directly
+- **Multi-provider** — reads Claude Code, Gemini CLI, and OpenClaw session files
+- **Zero auth required** — reads local session files directly, no API keys needed
 - **SQLite-backed** — indexes once, instant startup after first run
 - **Live file watching** — detects new session data in real-time with fs watcher
 - **Burn rate tracking** — see your $/hr, daily spend, weekly totals at a glance
@@ -121,7 +119,15 @@ aitop --refresh 5
 
 ## How It Works
 
-`aitop` reads Claude Code session files from `~/.claude/projects/` and indexes them into a local SQLite database at `~/.local/share/aitop/sessions.db`. Token costs are computed using current Anthropic pricing. The database is incrementally updated — only new data in JSONL files is parsed on subsequent runs.
+`aitop` reads session files from multiple AI coding tools and indexes them into a local SQLite database:
+
+| Provider | Data Location | Format |
+|----------|--------------|--------|
+| Claude Code | `~/.claude/projects/` | JSONL |
+| Gemini CLI | `~/.gemini/tmp/` | JSON |
+| OpenClaw | `~/.openclaw/agents/` | JSONL |
+
+Token costs are computed using built-in pricing (extensible via config). The database is incrementally updated — only new data is parsed on subsequent runs. Zero network calls.
 
 ## Configuration
 
@@ -140,7 +146,7 @@ theme = "ember"      # Color theme
 # cache_creation = 6.25
 ```
 
-Model pricing is extensible — built-in pricing covers Claude models (Opus, Sonnet, Haiku), and you can add or override pricing for any model via config.
+Model pricing is extensible — built-in pricing covers Claude (Opus, Sonnet, Haiku), Gemini, and OpenAI models. Add or override pricing for any model via config.
 
 ## Contributing
 
