@@ -113,15 +113,7 @@ aitop --refresh 5
 
 ## How It Works
 
-`aitop` reads session files from multiple AI coding tools and indexes them into a local SQLite database:
-
-| Provider | Data Location | Format |
-|----------|--------------|--------|
-| Claude Code | `~/.claude/projects/` | JSONL |
-| Gemini CLI | `~/.gemini/tmp/` | JSON |
-| OpenClaw | `~/.openclaw/agents/` | JSONL |
-
-Token costs are computed using built-in pricing (extensible via config). The database is incrementally updated — only new data is parsed on subsequent runs. Zero network calls.
+`aitop` reads session files from Claude Code, Gemini CLI, and OpenClaw, and indexes them into a local SQLite database. Token costs are computed using built-in pricing (extensible via config). The database is incrementally updated — only new data is parsed on subsequent runs. Zero network calls.
 
 ## Configuration
 
