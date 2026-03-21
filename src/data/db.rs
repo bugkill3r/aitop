@@ -230,7 +230,7 @@ impl Database {
                     )?;
                 }
                 tx.execute(
-                    "INSERT OR IGNORE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd)
+                    "INSERT OR REPLACE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd],
                 )?;
@@ -293,43 +293,36 @@ impl Database {
             return Ok(offset);
         }
 
-        let new_content = &content[offset as usize..];
-        let text = String::from_utf8_lossy(new_content);
+        // Parse with dedup (last entry wins for same message.id)
+        let results = super::parser::parse_file_content(&content, offset, &file.project, &self.pricing);
 
         let tx = self.conn.unchecked_transaction()?;
 
-        for line in text.lines() {
-            if line.trim().is_empty() {
-                continue;
+        for (session, message) in &results {
+            if let Some(s) = session {
+                tx.execute(
+                    "INSERT INTO sessions (id, project, started_at, updated_at, model, version, provider)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(id) DO UPDATE SET
+                        updated_at = MAX(sessions.updated_at, ?4),
+                        model = COALESCE(?5, sessions.model),
+                        version = COALESCE(?6, sessions.version)",
+                    params![s.id, s.project, s.started_at, s.updated_at, s.model, s.version, s.provider],
+                )?;
             }
-            if let Some((session, message)) =
-                super::parser::parse_jsonl_line(line, &file.project, &self.pricing)
-            {
-                if let Some(s) = session {
+            if let Some(m) = message {
+                // Update session's model and updated_at
+                if let Some(ref model) = m.model {
                     tx.execute(
-                        "INSERT INTO sessions (id, project, started_at, updated_at, model, version, provider)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                         ON CONFLICT(id) DO UPDATE SET
-                            updated_at = MAX(sessions.updated_at, ?4),
-                            model = COALESCE(?5, sessions.model),
-                            version = COALESCE(?6, sessions.version)",
-                        params![s.id, s.project, s.started_at, s.updated_at, s.model, s.version, s.provider],
+                        "UPDATE sessions SET model = ?1, updated_at = MAX(updated_at, ?2) WHERE id = ?3",
+                        params![model, m.timestamp, m.session_id],
                     )?;
                 }
-                if let Some(m) = message {
-                    // Update session's model and updated_at
-                    if let Some(ref model) = m.model {
-                        tx.execute(
-                            "UPDATE sessions SET model = ?1, updated_at = MAX(updated_at, ?2) WHERE id = ?3",
-                            params![model, m.timestamp, m.session_id],
-                        )?;
-                    }
-                    tx.execute(
-                        "INSERT OR IGNORE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                        params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd, m.provider],
-                    )?;
-                }
+                tx.execute(
+                    "INSERT OR REPLACE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd, m.provider],
+                )?;
             }
         }
 

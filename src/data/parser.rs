@@ -47,6 +47,7 @@ struct RawEntry {
 
 #[derive(Debug, Deserialize)]
 struct RawMessage {
+    id: Option<String>,
     model: Option<String>,
     #[allow(dead_code)]
     role: Option<String>,
@@ -141,8 +142,15 @@ pub fn parse_jsonl_line(
 
             let cost = pricing.compute_cost(&model, input, output, cache_read, cache_creation);
 
+            // Use message.id as the DB key when available. Claude Code writes
+            // multiple JSONL entries per logical message turn (one per tool-use
+            // round-trip), all sharing the same message.id but with different
+            // UUIDs. Using message.id as the key ensures we deduplicate them
+            // in parse_file_content (keeping only the last/final entry).
+            let msg_key = message.id.unwrap_or(uuid);
+
             let msg = ParsedMessage {
-                uuid,
+                uuid: msg_key,
                 session_id,
                 msg_type: "assistant".to_string(),
                 timestamp,
@@ -165,6 +173,11 @@ pub fn parse_jsonl_line(
 
 /// Parse all JSONL lines from file content (from a given offset), returning parsed data.
 /// This is a pure function with no DB I/O, suitable for parallel execution.
+///
+/// Deduplicates assistant messages by message key (message.id from the API).
+/// Claude Code writes multiple JSONL entries per logical turn (one per tool-use
+/// round-trip), all sharing the same message.id. We keep only the last entry
+/// for each key, which has the final accumulated output tokens.
 pub fn parse_file_content(
     content: &[u8],
     offset: u64,
@@ -178,15 +191,30 @@ pub fn parse_file_content(
     let new_content = &content[offset as usize..];
     let text = String::from_utf8_lossy(new_content);
     let mut results = Vec::new();
+    // Track assistant message positions by key for dedup (last wins)
+    let mut msg_key_to_idx: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
         }
         if let Some(parsed) = parse_jsonl_line(line, project, pricing) {
+            if let Some(ref msg) = parsed.1 {
+                if msg.msg_type == "assistant" {
+                    if let Some(&prev_idx) = msg_key_to_idx.get(&msg.uuid) {
+                        // Replace previous entry with this one (last wins)
+                        results[prev_idx] = (None, None); // blank out old entry
+                    }
+                    msg_key_to_idx.insert(msg.uuid.clone(), results.len());
+                }
+            }
             results.push(parsed);
         }
     }
+
+    // Remove blanked-out entries from dedup
+    results.retain(|entry| entry.0.is_some() || entry.1.is_some());
 
     results
 }
@@ -363,6 +391,46 @@ mod tests {
         let content = format!("\n\n{}\n\n", make_user_line("u1", "s1"));
         let results = parse_file_content(content.as_bytes(), 0, "proj", &pricing);
         assert_eq!(results.len(), 1);
+    }
+
+    fn make_assistant_line_with_msg_id(uuid: &str, session_id: &str, msg_id: &str, output: i64) -> String {
+        format!(
+            r#"{{"uuid":"{}","sessionId":"{}","type":"assistant","timestamp":"2025-01-01T00:01:00Z","message":{{"id":"{}","role":"assistant","model":"claude-opus-4-6","usage":{{"input_tokens":5,"output_tokens":{},"cache_read_input_tokens":17000,"cache_creation_input_tokens":6000}}}}}}"#,
+            uuid, session_id, msg_id, output
+        )
+    }
+
+    #[test]
+    fn test_parse_file_content_deduplicates_by_message_id() {
+        let pricing = PricingRegistry::builtin();
+        // Simulate 3 entries for the same message.id (tool-use round trips)
+        let content = format!(
+            "{}\n{}\n{}\n{}\n",
+            make_user_line("u1", "s1"),
+            make_assistant_line_with_msg_id("uuid-a", "s1", "msg_01ABC", 12),
+            make_assistant_line_with_msg_id("uuid-b", "s1", "msg_01ABC", 12),
+            make_assistant_line_with_msg_id("uuid-c", "s1", "msg_01ABC", 462),
+        );
+        let results = parse_file_content(content.as_bytes(), 0, "proj", &pricing);
+        // Should have 2 entries: 1 user + 1 assistant (deduped)
+        assert_eq!(results.len(), 2);
+        let msg = results[1].1.as_ref().unwrap();
+        // Should keep the last entry (highest output_tokens)
+        assert_eq!(msg.output_tokens, 462);
+        // Key should be message.id, not uuid
+        assert_eq!(msg.uuid, "msg_01ABC");
+    }
+
+    #[test]
+    fn test_parse_file_content_different_message_ids_not_deduped() {
+        let pricing = PricingRegistry::builtin();
+        let content = format!(
+            "{}\n{}\n",
+            make_assistant_line_with_msg_id("uuid-a", "s1", "msg_01AAA", 100),
+            make_assistant_line_with_msg_id("uuid-b", "s1", "msg_01BBB", 200),
+        );
+        let results = parse_file_content(content.as_bytes(), 0, "proj", &pricing);
+        assert_eq!(results.len(), 2);
     }
 
     #[test]
