@@ -78,20 +78,51 @@ fn render_chart(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::l
         return;
     }
 
-    let max_cost = state
-        .daily_spend
+    // Build token lookup for token mode
+    let token_map: std::collections::HashMap<&str, i64> = state
+        .daily_tokens
         .iter()
-        .map(|d| d.cost)
-        .fold(0.0f64, f64::max);
-    let y_max = (max_cost * 1.2).max(1.0);
+        .map(|t| (t.date.as_str(), t.total_tokens))
+        .collect();
+
+    // Primary values: tokens when toggled, cost otherwise
+    let values: Vec<f64> = if state.show_token_overlay {
+        state
+            .daily_spend
+            .iter()
+            .map(|d| token_map.get(d.date.as_str()).copied().unwrap_or(0) as f64)
+            .collect()
+    } else {
+        state.daily_spend.iter().map(|d| d.cost).collect()
+    };
+
+    let max_val = values.iter().cloned().fold(0.0f64, f64::max);
+    let y_max = (max_val * 1.2).max(1.0);
+
+    let y_labels = if state.show_token_overlay {
+        vec![
+            Span::styled("0", Style::default().fg(theme.text_dim)),
+            Span::styled(
+                format_tokens_short(y_max as i64),
+                Style::default().fg(theme.text_dim),
+            ),
+        ]
+    } else {
+        vec![
+            Span::styled("$0", Style::default().fg(theme.text_dim)),
+            Span::styled(
+                format!("${:.0}", y_max),
+                Style::default().fg(theme.text_dim),
+            ),
+        ]
+    };
 
     match state.chart_type {
         ChartType::Line => {
-            let data_points: Vec<(f64, f64)> = state
-                .daily_spend
+            let data_points: Vec<(f64, f64)> = values
                 .iter()
                 .enumerate()
-                .map(|(i, d)| (i as f64, d.cost))
+                .map(|(i, &v)| (i as f64, v))
                 .collect();
 
             let x_labels: Vec<Span> = if state.daily_spend.len() > 1 {
@@ -109,55 +140,17 @@ fn render_chart(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::l
                 vec![Span::styled("today", Style::default().fg(theme.text_dim))]
             };
 
-            let cost_dataset = Dataset::default()
-                .name("Cost ($)")
+            let dataset_name = if state.show_token_overlay { "Tokens" } else { "Cost ($)" };
+            let dataset_color = if state.show_token_overlay { theme.secondary } else { theme.accent };
+
+            let dataset = Dataset::default()
+                .name(dataset_name)
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(theme.accent))
+                .style(Style::default().fg(dataset_color))
                 .data(&data_points);
 
-            // Optionally add token overlay dataset
-            let (token_data, max_tokens) = prepare_token_overlay(&state.daily_spend, &state.daily_tokens);
-
-            // Normalize tokens to fit on the cost y-axis
-            let normalized_token_data: Vec<(f64, f64)> = if state.show_token_overlay && max_tokens > 0.0 {
-                token_data
-                    .iter()
-                    .map(|&(x, t)| (x, t / max_tokens * y_max))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-
-            let mut datasets = vec![cost_dataset];
-
-            if state.show_token_overlay && !normalized_token_data.is_empty() {
-                let token_dataset = Dataset::default()
-                    .name("Tokens")
-                    .marker(symbols::Marker::Braille)
-                    .graph_type(GraphType::Line)
-                    .style(Style::default().fg(theme.secondary))
-                    .data(&normalized_token_data);
-                datasets.push(token_dataset);
-            }
-
-            let mut y_labels = vec![
-                Span::styled("$0", Style::default().fg(theme.text_dim)),
-                Span::styled(
-                    format!("${:.0}", y_max),
-                    Style::default().fg(theme.text_dim),
-                ),
-            ];
-
-            if state.show_token_overlay {
-                // Add a note about the right axis scale in the top label
-                y_labels[1] = Span::styled(
-                    format!("${:.0} | {}", y_max, format_tokens_short(max_tokens as i64)),
-                    Style::default().fg(theme.text_dim),
-                );
-            }
-
-            let chart = Chart::new(datasets)
+            let chart = Chart::new(vec![dataset])
                 .block(block)
                 .x_axis(
                     Axis::default()
@@ -175,7 +168,7 @@ fn render_chart(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::l
         ChartType::Bar => {
             let inner = block.inner(area);
             f.render_widget(block, area);
-            render_bar_chart(f, state, theme, inner, y_max);
+            render_bar_chart(f, state, theme, inner, y_max, &values);
         }
     }
 }
@@ -186,6 +179,7 @@ fn render_bar_chart(
     theme: &Theme,
     area: ratatui::layout::Rect,
     y_max: f64,
+    values: &[f64],
 ) {
     use super::widgets::cost_color::cost_color;
 
@@ -193,7 +187,7 @@ fn render_bar_chart(
         return;
     }
 
-    let n = state.daily_spend.len();
+    let n = values.len();
     if n == 0 {
         return;
     }
@@ -205,15 +199,20 @@ fn render_bar_chart(
     let slot_width = (available_width / n).max(1);
     let bar_w = slot_width.saturating_sub(1).max(1);
 
+    let y_top_label = if state.show_token_overlay {
+        format!(" {:<7}", format_tokens_short(y_max as i64))
+    } else {
+        format!(" ${:<5.0} ", y_max)
+    };
+
+    let y_bottom_label = if state.show_token_overlay { " 0      " } else { " $0     " };
+
     // Build bar rows from top to bottom
     let mut lines = Vec::new();
 
     // Y-axis top label
     lines.push(Line::from(vec![
-        Span::styled(
-            format!(" ${:<5.0} ", y_max),
-            Style::default().fg(theme.text_dim),
-        ),
+        Span::styled(y_top_label, Style::default().fg(theme.text_dim)),
     ]));
 
     // Bar rows (top to bottom)
@@ -221,14 +220,18 @@ fn render_bar_chart(
         let threshold = y_max * (1.0 - (row as f64 / chart_height as f64));
         let mut spans = vec![Span::raw("        ")]; // left margin
 
-        for day in &state.daily_spend {
-            let ch = if day.cost >= threshold {
+        for val in values {
+            let ch = if *val >= threshold {
                 "\u{2588}".repeat(bar_w) // █
             } else {
                 " ".repeat(bar_w)
             };
-            let color = if day.cost >= threshold {
-                cost_color(day.cost)
+            let color = if *val >= threshold {
+                if state.show_token_overlay {
+                    theme.secondary
+                } else {
+                    cost_color(*val)
+                }
             } else {
                 theme.bar_empty
             };
@@ -241,7 +244,7 @@ fn render_bar_chart(
     }
 
     // X-axis labels
-    let mut label_spans = vec![Span::styled(" $0     ", Style::default().fg(theme.text_dim))];
+    let mut label_spans = vec![Span::styled(y_bottom_label, Style::default().fg(theme.text_dim))];
     for (i, day) in state.daily_spend.iter().enumerate() {
         // Show label for first, last, and every ~7th day
         let label = if i == 0 || i == n - 1 || (n > 14 && i % 7 == 0) {
@@ -514,46 +517,111 @@ fn render_stats(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::l
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let total: f64 = state.daily_spend.iter().map(|d| d.cost).sum();
     let days = state.daily_spend.len().max(1);
-    let avg = total / days as f64;
-    let projected_monthly = avg * 30.0;
 
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(inner);
 
-    let left = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("  Avg/day: ", Style::default().fg(theme.text_dim)),
-            Span::styled(format!("${:.2}", avg), Style::default().fg(theme.tertiary).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Projected/mo: ", Style::default().fg(theme.text_dim)),
-            Span::styled(
-                format!("${:.0}", projected_monthly),
-                Style::default().fg(if projected_monthly > 200.0 { theme.danger } else { theme.text }),
-            ),
-        ]),
-    ]);
+    // Build token lookup for token mode
+    let token_map: std::collections::HashMap<&str, i64> = state
+        .daily_tokens
+        .iter()
+        .map(|t| (t.date.as_str(), t.total_tokens))
+        .collect();
 
-    let max_day = state.daily_spend.iter().max_by(|a, b| a.cost.partial_cmp(&b.cost).unwrap());
-    let right_lines = if let Some(peak) = max_day {
-        vec![
+    let left = if state.show_token_overlay {
+        let total_tokens: i64 = state
+            .daily_spend
+            .iter()
+            .map(|d| token_map.get(d.date.as_str()).copied().unwrap_or(0))
+            .sum();
+        let avg_tokens = total_tokens / days as i64;
+
+        Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("  Peak day: ", Style::default().fg(theme.text_dim)),
-                Span::styled(format!("{} (${:.2})", peak.date, peak.cost), Style::default().fg(theme.accent)),
-            ]),
-            Line::from(vec![
+                Span::styled("  Avg/day: ", Style::default().fg(theme.text_dim)),
                 Span::styled(
-                    format!("  {} days tracked", days),
-                    Style::default().fg(theme.text_dim),
+                    format_tokens_short(avg_tokens),
+                    Style::default().fg(theme.tertiary).add_modifier(Modifier::BOLD),
                 ),
             ]),
-        ]
+            Line::from(vec![
+                Span::styled("  Total: ", Style::default().fg(theme.text_dim)),
+                Span::styled(
+                    format_tokens_short(total_tokens),
+                    Style::default().fg(theme.text),
+                ),
+            ]),
+        ])
     } else {
-        vec![Line::from(Span::styled("  No data", Style::default().fg(theme.text_dim)))]
+        let total: f64 = state.daily_spend.iter().map(|d| d.cost).sum();
+        let avg = total / days as f64;
+        let projected_monthly = avg * 30.0;
+
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("  Avg/day: ", Style::default().fg(theme.text_dim)),
+                Span::styled(format!("${:.2}", avg), Style::default().fg(theme.tertiary).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(vec![
+                Span::styled("  Projected/mo: ", Style::default().fg(theme.text_dim)),
+                Span::styled(
+                    format!("${:.0}", projected_monthly),
+                    Style::default().fg(if projected_monthly > 200.0 { theme.danger } else { theme.text }),
+                ),
+            ]),
+        ])
+    };
+
+    let right_lines = if state.show_token_overlay {
+        let peak = state
+            .daily_spend
+            .iter()
+            .map(|d| {
+                let tokens = token_map.get(d.date.as_str()).copied().unwrap_or(0);
+                (d.date.as_str(), tokens)
+            })
+            .max_by_key(|&(_, t)| t);
+
+        if let Some((date, tokens)) = peak {
+            vec![
+                Line::from(vec![
+                    Span::styled("  Peak day: ", Style::default().fg(theme.text_dim)),
+                    Span::styled(
+                        format!("{} ({})", date, format_tokens_short(tokens)),
+                        Style::default().fg(theme.accent),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled(
+                        format!("  {} days tracked", days),
+                        Style::default().fg(theme.text_dim),
+                    ),
+                ]),
+            ]
+        } else {
+            vec![Line::from(Span::styled("  No data", Style::default().fg(theme.text_dim)))]
+        }
+    } else {
+        let max_day = state.daily_spend.iter().max_by(|a, b| a.cost.partial_cmp(&b.cost).unwrap());
+        if let Some(peak) = max_day {
+            vec![
+                Line::from(vec![
+                    Span::styled("  Peak day: ", Style::default().fg(theme.text_dim)),
+                    Span::styled(format!("{} (${:.2})", peak.date, peak.cost), Style::default().fg(theme.accent)),
+                ]),
+                Line::from(vec![
+                    Span::styled(
+                        format!("  {} days tracked", days),
+                        Style::default().fg(theme.text_dim),
+                    ),
+                ]),
+            ]
+        } else {
+            vec![Line::from(Span::styled("  No data", Style::default().fg(theme.text_dim)))]
+        }
     };
 
     f.render_widget(left, cols[0]);
