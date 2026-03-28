@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import ServiceManagement
 
 enum MenuBarItem: String, CaseIterable, Identifiable {
     case today = "Today"
@@ -54,5 +55,22 @@ final class Preferences: ObservableObject {
 
     func isEnabled(_ item: MenuBarItem) -> Bool {
         enabledItems.contains(item)
+    }
+
+    // MARK: - Launch at Login
+
+    @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled {
+        didSet {
+            do {
+                if launchAtLogin {
+                    try SMAppService.mainApp.register()
+                } else {
+                    try SMAppService.mainApp.unregister()
+                }
+            } catch {
+                // Revert on failure
+                launchAtLogin = SMAppService.mainApp.status == .enabled
+            }
+        }
     }
 }

@@ -19,27 +19,30 @@ struct MenuBarLabel: View {
     }
 
     private var labelText: String {
-        // Build label from enabled items in a stable order
-        let ordered: [(MenuBarItem, String)] = MenuBarItem.allCases.compactMap { item in
+        let items: [(MenuBarItem, String)] = MenuBarItem.allCases.compactMap { item in
             guard prefs.isEnabled(item) else { return nil }
-            let value: String
-            switch item {
-            case .today:
-                value = "\(Theme.formatCurrency(store.stats.spendToday)) today"
-            case .burnRate:
-                value = Theme.formatRate(store.stats.burnRatePerHour)
-            case .week:
-                value = "\(Theme.formatCurrency(store.stats.spendThisWeek)) wk"
-            case .allTime:
-                value = Theme.formatCurrency(store.stats.spendAllTime)
-            }
-            return (item, value)
+            return (item, formattedValue(item))
         }
 
-        if ordered.isEmpty {
-            return Theme.formatCurrency(store.stats.spendToday)
+        if items.isEmpty {
+            return formattedValue(.today)
         }
 
-        return ordered.map(\.1).joined(separator: "  ")
+        // Single item: show with suffix for context
+        // Multiple items: show with suffix to distinguish
+        return items.map(\.1).joined(separator: " · ")
+    }
+
+    private func formattedValue(_ item: MenuBarItem) -> String {
+        switch item {
+        case .today:
+            return "\(Theme.formatCurrency(store.stats.spendToday)) today"
+        case .burnRate:
+            return "\(Theme.formatCurrency(store.stats.burnRatePerHour))/hr"
+        case .week:
+            return "\(Theme.formatCurrency(store.stats.spendThisWeek))/wk"
+        case .allTime:
+            return "\(Theme.formatCurrency(store.stats.spendAllTime)) total"
+        }
     }
 }

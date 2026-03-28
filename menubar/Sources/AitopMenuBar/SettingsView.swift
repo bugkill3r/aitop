@@ -32,6 +32,34 @@ struct SettingsView: View {
                     settingsRow(item)
                 }
             }
+
+            Rectangle()
+                .fill(Color.white.opacity(0.06))
+                .frame(height: 1)
+                .padding(.vertical, 4)
+
+            Button {
+                prefs.launchAtLogin.toggle()
+            } label: {
+                HStack {
+                    Image(systemName: prefs.launchAtLogin ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 14))
+                        .foregroundStyle(prefs.launchAtLogin ? Theme.accent : Theme.tertiaryText)
+
+                    Text("Launch at Login")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.primaryText)
+
+                    Spacer()
+                }
+                .padding(.vertical, 6)
+                .padding(.horizontal, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(prefs.launchAtLogin ? Color.white.opacity(0.04) : Color.clear)
+                )
+            }
+            .buttonStyle(.plain)
         }
         .padding(14)
         .background(
@@ -76,10 +104,10 @@ struct SettingsView: View {
 
     private func previewValue(_ item: MenuBarItem) -> String {
         switch item {
-        case .today: return "e.g. $59 today"
-        case .burnRate: return "e.g. $49/hr"
-        case .week: return "e.g. $257 wk"
-        case .allTime: return "e.g. $1184"
+        case .today: return "$59 today"
+        case .burnRate: return "$49/hr"
+        case .week: return "$257/wk"
+        case .allTime: return "$1184 total"
         }
     }
 }
