@@ -86,7 +86,7 @@ struct MenuBarView: View {
 
     private var spendGrid: some View {
         HStack(spacing: 10) {
-            spendCard("Last hr", Theme.formatCurrency(store.stats.burnRatePerHour), prominent: false)
+            spendCard("Burn Rate", Theme.formatRate(store.stats.burnRatePerHour), prominent: false)
             spendCard("Week", Theme.formatCurrency(store.stats.spendThisWeek), prominent: false)
             spendCard("All Time", Theme.formatCurrency(store.stats.spendAllTime), prominent: false)
         }
@@ -223,6 +223,7 @@ struct MenuBarView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(Theme.accent)
+            .focusable(false)
 
             Spacer()
 
@@ -235,6 +236,7 @@ struct MenuBarView: View {
                     .font(.system(size: 12))
             }
             .buttonStyle(.plain)
+            .focusable(false)
             .foregroundStyle(Theme.tertiaryText)
 
             Button {

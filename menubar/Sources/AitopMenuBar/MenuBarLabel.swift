@@ -38,7 +38,7 @@ struct MenuBarLabel: View {
         case .today:
             return "\(Theme.formatCurrency(store.stats.spendToday)) today"
         case .burnRate:
-            return "\(Theme.formatCurrency(store.stats.burnRatePerHour)) last hr"
+            return Theme.formatRate(store.stats.burnRatePerHour)
         case .week:
             return "\(Theme.formatCurrency(store.stats.spendThisWeek))/wk"
         case .allTime:
