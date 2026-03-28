@@ -3,3 +3,4 @@ npm/aitop-*/bin/
 *.tar.gz
 dist/
 .claude/
+menubar/.build/

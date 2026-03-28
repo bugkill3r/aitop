@@ -9,6 +9,20 @@
 
 Like `btop` monitors your system resources, `aitop` monitors your AI spend. Built for developers who live in the terminal and want to keep an eye on their Claude Code, Gemini CLI, and OpenClaw costs without leaving it.
 
+## Menu Bar App (macOS)
+
+![Menu Bar](assets/menubar.png)
+
+A native macOS menu bar companion that shows your AI spend at a glance. Flame icon (solid = live, outline = idle), click to see burn rate, model breakdown, recent sessions, and cache efficiency. Reads directly from aitop's SQLite DB — no network calls, no aitop process required.
+
+```bash
+cd menubar
+swift build -c release
+.build/release/AitopMenuBar
+```
+
+Requires macOS 13+ (Ventura).
+
 <details>
 <summary>More screenshots</summary>
 
