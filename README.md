@@ -17,11 +17,11 @@ A native macOS menu bar companion that shows your AI spend at a glance. Flame ic
 
 ```bash
 cd menubar
-swift build -c release
-.build/release/AitopMenuBar
+make install        # builds and installs to /Applications
+open /Applications/AitopMenuBar.app
 ```
 
-Requires macOS 13+ (Ventura).
+Enable **Launch at Login** in the app's settings to start automatically on boot. Requires macOS 13+ (Ventura).
 
 <details>
 <summary>More screenshots</summary>
