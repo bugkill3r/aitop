@@ -105,7 +105,7 @@ struct SettingsView: View {
     private func previewValue(_ item: MenuBarItem) -> String {
         switch item {
         case .today: return "$59 today"
-        case .burnRate: return "$49/hr"
+        case .burnRate: return "$49 last hr"
         case .week: return "$257/wk"
         case .allTime: return "$1184 total"
         }

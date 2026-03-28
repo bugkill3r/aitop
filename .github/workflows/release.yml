@@ -65,9 +65,35 @@ jobs:
           name: aitop-${{ matrix.target }}
           path: aitop-*.tar.gz
 
+  menubar:
+    name: Build Menu Bar App
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build menu bar app
+        run: |
+          cd menubar
+          swift build -c release
+
+      - name: Create app bundle
+        run: |
+          mkdir -p AitopMenuBar.app/Contents/MacOS
+          cp menubar/.build/release/AitopMenuBar AitopMenuBar.app/Contents/MacOS/
+          cp menubar/Info.plist AitopMenuBar.app/Contents/
+
+      - name: Create zip
+        run: |
+          zip -r AitopMenuBar-${{ github.ref_name }}.zip AitopMenuBar.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aitop-menubar
+          path: AitopMenuBar-*.zip
+
   release:
     name: Publish Release
-    needs: build
+    needs: [build, menubar]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -75,7 +101,7 @@ jobs:
           merge-multiple: true
 
       - name: Generate checksums
-        run: sha256sum aitop-*.tar.gz > checksums-sha256.txt
+        run: sha256sum aitop-*.tar.gz AitopMenuBar-*.zip > checksums-sha256.txt
 
       - name: Display checksums
         run: cat checksums-sha256.txt
@@ -84,6 +110,7 @@ jobs:
         with:
           files: |
             aitop-*.tar.gz
+            AitopMenuBar-*.zip
             checksums-sha256.txt
           generate_release_notes: true
 

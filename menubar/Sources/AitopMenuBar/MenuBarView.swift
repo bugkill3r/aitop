@@ -53,15 +53,20 @@ struct MenuBarView: View {
             .padding(.horizontal, 12)
     }
 
-    // MARK: - Hero: Burn Rate + Status
+    // MARK: - Hero: Today's Spend + Status
 
     private var heroSection: some View {
         VStack(spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
-                Text(Theme.formatRate(store.stats.burnRatePerHour))
-                    .font(.system(size: 28, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(Theme.primaryText)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(Theme.formatCurrency(store.stats.spendToday))
+                        .font(.system(size: 28, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.primaryText)
+                    Text("today")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.tertiaryText)
+                }
 
                 Spacer()
 
@@ -74,22 +79,14 @@ struct MenuBarView: View {
                         .foregroundStyle(store.stats.isLive ? Theme.live : Theme.idle)
                 }
             }
-
-            // Cache efficiency as a subtle subtitle
-            HStack {
-                Text("Cache \(String(format: "%.0f%%", store.cacheStats.hitRatio))")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.tertiaryText)
-                Spacer()
-            }
         }
     }
 
-    // MARK: - Spend Grid (2x2)
+    // MARK: - Spend Grid
 
     private var spendGrid: some View {
         HStack(spacing: 10) {
-            spendCard("Today", Theme.formatCurrency(store.stats.spendToday), prominent: true)
+            spendCard("Last hr", Theme.formatCurrency(store.stats.burnRatePerHour), prominent: false)
             spendCard("Week", Theme.formatCurrency(store.stats.spendThisWeek), prominent: false)
             spendCard("All Time", Theme.formatCurrency(store.stats.spendAllTime), prominent: false)
         }
