@@ -2,7 +2,7 @@
 name = "aitop"
 version = "0.5.0"
 edition = "2021"
-authors = ["Saurabh Mishra <skmishra1991@gmail.com>"]
+authors = ["Saurabh Mishra"]
 description = "btop for AI — terminal dashboard for token usage and costs"
 license = "MIT"
 repository = "https://github.com/bugkill3r/aitop"
