@@ -6,13 +6,13 @@
 
 **btop for AI** — a terminal dashboard for monitoring AI token usage, costs, and sessions.
 
-![Dashboard](assets/screenshot-dashboard.png)
+![Dashboard](https://raw.githubusercontent.com/bugkill3r/aitop/master/assets/screenshot-dashboard.png)
 
 Like `btop` monitors your system resources, `aitop` monitors your AI spend. Built for developers who live in the terminal and want to keep an eye on their Claude Code, Gemini CLI, and OpenClaw costs without leaving it.
 
 ## Menu Bar App (macOS)
 
-![Menu Bar](assets/menubar.png)
+![Menu Bar](https://raw.githubusercontent.com/bugkill3r/aitop/master/assets/menubar.png)
 
 A native macOS menu bar companion that shows your AI spend at a glance. Flame icon (solid = live, outline = idle), click to see burn rate, model breakdown, recent sessions, and cache efficiency. Reads directly from aitop's SQLite DB — no network calls, no aitop process required.
 
@@ -42,10 +42,10 @@ Enable **Launch at Login** in the app's settings to start automatically on boot.
 <summary>More screenshots</summary>
 
 ### Sessions
-![Sessions](assets/screenshot-sessions.png)
+![Sessions](https://raw.githubusercontent.com/bugkill3r/aitop/master/assets/screenshot-sessions.png)
 
 ### Trends
-![Trends](assets/screenshot-trends.png)
+![Trends](https://raw.githubusercontent.com/bugkill3r/aitop/master/assets/screenshot-trends.png)
 
 </details>
 
@@ -65,7 +65,7 @@ Enable **Launch at Login** in the app's settings to start automatically on boot.
 - **Spend trends** — daily cost chart with projections, heatmap, and contribution calendar
 - **Project cost attribution** — cost breakdown by project
 - **Token efficiency score** — tokens per dollar, cache savings metrics
-- **6 color themes** — ember (default), nord, dracula, gruvbox, catppuccin, mono — cycle with `p`
+- **6 color themes** — catppuccin (default), ember, nord, dracula, gruvbox, mono — cycle with `p`
 - **3MB single binary**, zero runtime dependencies, zero network calls
 
 ## Install
@@ -150,7 +150,7 @@ Config file at `~/.config/aitop/config.toml`:
 
 ```toml
 refresh = 2          # Refresh interval in seconds
-theme = "ember"      # Color theme
+theme = "catppuccin"  # Color theme
 # weekly_budget = 200.0  # Optional budget gauge
 
 # Custom model pricing (per million tokens)
