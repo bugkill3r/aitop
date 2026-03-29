@@ -32,7 +32,7 @@ use aitop::ui::format::{format_tokens, shorten_model};
 use aitop::ui::theme::THEME_NAMES;
 
 #[derive(Parser, Debug)]
-#[command(name = "aitop", about = "btop for AI — terminal dashboard for token usage and costs")]
+#[command(name = "aitop", about = "btop for AI — terminal dashboard for token usage and costs", version)]
 struct Args {
     /// Color theme (ember, nord, dracula, gruvbox, catppuccin, mono)
     #[arg(short, long)]

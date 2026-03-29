@@ -32,7 +32,7 @@ fn default_refresh() -> f64 {
 }
 
 fn default_theme() -> String {
-    "ember".to_string()
+    "catppuccin".to_string()
 }
 
 impl Default for Config {
