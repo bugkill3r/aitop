@@ -142,6 +142,7 @@ jobs:
           echo "x86_64_darwin=$(sha256sum aitop-*-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "aarch64_linux=$(sha256sum aitop-*-aarch64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "x86_64_linux=$(sha256sum aitop-*-x86_64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "menubar=$(sha256sum AitopMenuBar-*.zip | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Update formula
         run: |
@@ -183,13 +184,34 @@ jobs:
             end
           end
           FORMULA
-          # Remove leading whitespace from heredoc
           sed -i 's/^          //' Formula/aitop.rb
 
-      - name: Push updated formula
+      - name: Update cask
+        run: |
+          mkdir -p Casks
+          cat > Casks/aitop-menubar.rb << CASK
+          cask "aitop-menubar" do
+            version "${{ steps.version.outputs.version }}"
+            sha256 "${{ steps.sha.outputs.menubar }}"
+
+            url "https://github.com/bugkill3r/aitop/releases/download/v#{version}/AitopMenuBar-v#{version}.zip"
+            name "AitopMenuBar"
+            desc "Menu bar companion for aitop — AI spend at a glance"
+            homepage "https://github.com/bugkill3r/aitop"
+
+            app "AitopMenuBar.app"
+
+            zap trash: [
+              "~/Library/Preferences/com.bugkill3r.aitop-menubar.plist",
+            ]
+          end
+          CASK
+          sed -i 's/^          //' Casks/aitop-menubar.rb
+
+      - name: Push updated formula and cask
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/aitop.rb
+          git add Formula/aitop.rb Casks/aitop-menubar.rb
           git commit -m "Update aitop to ${{ steps.version.outputs.version }}"
           git push

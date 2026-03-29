@@ -16,6 +16,20 @@ Like `btop` monitors your system resources, `aitop` monitors your AI spend. Buil
 
 A native macOS menu bar companion that shows your AI spend at a glance. Flame icon (solid = live, outline = idle), click to see burn rate, model breakdown, recent sessions, and cache efficiency. Reads directly from aitop's SQLite DB — no network calls, no aitop process required.
 
+### Install (Homebrew Cask)
+
+```bash
+brew install --cask bugkill3r/aitop/aitop-menubar
+```
+
+### Install (GitHub Releases)
+
+Download `AitopMenuBar.zip` from the [Releases](https://github.com/bugkill3r/aitop/releases) page, unzip, and move to `/Applications`.
+
+> **macOS note:** Unsigned app may trigger Gatekeeper. Run `xattr -d com.apple.quarantine /Applications/AitopMenuBar.app` after installing.
+
+### Build from source
+
 ```bash
 cd menubar
 make install        # builds and installs to /Applications
