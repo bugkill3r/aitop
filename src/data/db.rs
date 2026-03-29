@@ -4,7 +4,6 @@ use std::path::Path;
 
 use super::parser::{ParsedMessage, ParsedSession};
 use super::pricing::PricingRegistry;
-use super::provider::Provider;
 use super::scanner::SessionFile;
 
 pub struct Database {
@@ -430,69 +429,5 @@ impl Database {
             &self.pricing,
         )?;
         self.ingest_parsed(&file.path, session.as_ref(), &messages)
-    }
-
-    /// Ingest an Amp thread JSON file.
-    pub fn ingest_amp_file(&self, file: &SessionFile) -> Result<()> {
-        let (session, messages) = super::amp::parse_amp_file(
-            &file.path,
-            &file.project,
-            &self.pricing,
-        )?;
-        self.ingest_parsed(&file.path, Some(&session), &messages)
-    }
-
-    /// Ingest a Roo Code ui_messages.json file.
-    pub fn ingest_roo_code_file(&self, file: &SessionFile) -> Result<()> {
-        let (session, messages) = super::roo_code::parse_roo_code_file(
-            &file.path,
-            &file.project,
-            &self.pricing,
-        )?;
-        self.ingest_parsed(&file.path, Some(&session), &messages)
-    }
-
-    /// Ingest a Mux session-usage.json file.
-    pub fn ingest_mux_file(&self, file: &SessionFile) -> Result<()> {
-        let (session, messages) = super::mux::parse_mux_file(
-            &file.path,
-            &file.project,
-            &self.pricing,
-        )?;
-        self.ingest_parsed(&file.path, Some(&session), &messages)
-    }
-
-    /// Ingest a Kimi CLI wire.jsonl file.
-    pub fn ingest_kimi_file(&self, file: &SessionFile) -> Result<()> {
-        let (session, messages) = super::kimi::parse_kimi_file(
-            &file.path,
-            &file.project,
-            &self.pricing,
-        )?;
-        self.ingest_parsed(&file.path, Some(&session), &messages)
-    }
-
-    /// Ingest a Qwen CLI JSONL chat file.
-    pub fn ingest_qwen_file(&self, file: &SessionFile) -> Result<()> {
-        let (session, messages) = super::qwen::parse_qwen_file(
-            &file.path,
-            &file.project,
-            &self.pricing,
-        )?;
-        self.ingest_parsed(&file.path, Some(&session), &messages)
-    }
-
-    /// Generic provider file ingestion — dispatches to the correct parser.
-    pub fn ingest_provider_file(&self, provider: &Provider, file: &SessionFile) -> Result<()> {
-        match provider {
-            Provider::Claude => { self.ingest_file(file)?; Ok(()) },
-            Provider::Gemini => self.ingest_gemini_file(file),
-            Provider::OpenClaw => self.ingest_openclaw_file(file),
-            Provider::Amp => self.ingest_amp_file(file),
-            Provider::RooCode => self.ingest_roo_code_file(file),
-            Provider::Mux => self.ingest_mux_file(file),
-            Provider::KimiCli => self.ingest_kimi_file(file),
-            Provider::QwenCli => self.ingest_qwen_file(file),
-        }
     }
 }
