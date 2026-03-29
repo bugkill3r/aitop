@@ -42,6 +42,7 @@ struct MenuBarView: View {
             }
         }
         .frame(width: 300)
+        .focusable(false)
     }
 
     // MARK: - Divider
@@ -223,7 +224,7 @@ struct MenuBarView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(Theme.accent)
-            .focusable(false)
+
 
             Spacer()
 
@@ -236,7 +237,7 @@ struct MenuBarView: View {
                     .font(.system(size: 12))
             }
             .buttonStyle(.plain)
-            .focusable(false)
+
             .foregroundStyle(Theme.tertiaryText)
 
             Button {
@@ -246,6 +247,7 @@ struct MenuBarView: View {
                     .font(.system(size: 11))
             }
             .buttonStyle(.plain)
+
             .foregroundStyle(Theme.tertiaryText)
             .padding(.leading, 8)
         }
