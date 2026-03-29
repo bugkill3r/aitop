@@ -14,7 +14,6 @@ const CACHE_KEY = "aitop_last_stats";
 // Theme — matches aitop menu bar / TUI
 const C = {
   bg:       new Color("#1a1a2e"),
-  card:     new Color("#242440"),
   accent:   new Color("#ff9933"),
   white:    new Color("#ffffff"),
   dim:      new Color("#888899"),
@@ -136,18 +135,19 @@ function addSpendCard(parent, value, label) {
   const card = parent.addStack();
   card.layoutVertically();
   card.centerAlignContent();
-  card.backgroundColor = C.card;
-  card.cornerRadius = 8;
-  card.setPadding(8, 12, 8, 12);
+  card.setPadding(4, 0, 4, 0);
 
-  const v = card.addText(value);
+  const row = card.addStack();
+  row.layoutHorizontally();
+  row.bottomAlignContent();
+  row.spacing = 2;
+
+  const v = row.addText(value);
   v.font = F.cardVal;
   v.textColor = C.white;
   v.lineLimit = 1;
 
-  card.addSpacer(2);
-
-  const l = card.addText(label);
+  const l = row.addText(label);
   l.font = F.cardLabel;
   l.textColor = C.dim;
 }
@@ -155,10 +155,11 @@ function addSpendCard(parent, value, label) {
 function addSpendGrid(parent, data) {
   const row = parent.addStack();
   row.layoutHorizontally();
-  row.spacing = 8;
 
   addSpendCard(row, fmtCompact(data.burn_rate), "/hr");
+  row.addSpacer();
   addSpendCard(row, fmtCompact(data.spend_this_week), "/wk");
+  row.addSpacer();
   addSpendCard(row, fmtCompact(data.spend_all_time), "total");
 }
 
