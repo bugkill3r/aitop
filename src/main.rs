@@ -16,7 +16,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Tabs};
 use ratatui::Terminal;
-use serde::Serialize;
 
 use aitop::app::{AppState, SessionSort, TrendRange, View};
 use aitop::config::Config;
@@ -24,11 +23,6 @@ use aitop::data::aggregator::Aggregator;
 use aitop::data::db::Database;
 use aitop::data::gemini::scan_gemini_sessions;
 use aitop::data::openclaw::scan_openclaw_sessions;
-use aitop::data::amp::scan_amp_sessions;
-use aitop::data::roo_code::scan_roo_code_sessions;
-use aitop::data::mux::scan_mux_sessions;
-use aitop::data::kimi::scan_kimi_sessions;
-use aitop::data::qwen::scan_qwen_sessions;
 use aitop::data::pricing::PricingRegistry;
 use aitop::data::provider::Provider;
 use aitop::data::scanner::scan_projects;
@@ -59,34 +53,10 @@ struct Args {
     /// Filter by project name
     #[arg(short, long)]
     project: Option<String>,
-
-    /// Output aggregated data as JSON and exit
-    #[arg(long)]
-    json: bool,
-
-    /// Fetch/update LiteLLM pricing cache and exit
-    #[arg(long)]
-    update_pricing: bool,
-
-    /// Start HTTP API server
-    #[arg(long)]
-    serve: bool,
-
-    /// Port for --serve mode
-    #[arg(long, default_value = "8080")]
-    port: u16,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-
-    // Handle --update-pricing early (no config/db needed)
-    if args.update_pricing {
-        let cache_path = aitop::data::litellm::cache_path();
-        aitop::data::litellm::fetch_and_cache(&cache_path)?;
-        return Ok(());
-    }
-
     let mut config = Config::load()?;
 
     if let Some(theme) = args.theme {
@@ -97,63 +67,29 @@ fn main() -> Result<()> {
     }
 
     // Build pricing registry from config (with optional user overrides)
-    let mut pricing = if config.model_pricing.is_empty() {
+    let pricing = if config.model_pricing.is_empty() {
         PricingRegistry::builtin()
     } else {
         PricingRegistry::with_overrides(&config.model_pricing)
     };
-
-    // Supplement with LiteLLM cached pricing (lowest priority, zero network calls)
-    let litellm_cache = aitop::data::litellm::cache_path();
-    if let Ok(litellm_prices) = aitop::data::litellm::load_cached(&litellm_cache) {
-        if !litellm_prices.is_empty() {
-            pricing = pricing.with_litellm_supplement(&litellm_prices);
-        }
-    }
-
-    // Auto-update pricing if configured and cache is stale
-    if config.auto_update_pricing == Some(true)
-        && (!litellm_cache.exists() || is_cache_stale(&litellm_cache))
-    {
-        if let Ok(()) = aitop::data::litellm::fetch_and_cache(&litellm_cache) {
-            if let Ok(litellm_prices) = aitop::data::litellm::load_cached(&litellm_cache) {
-                if !litellm_prices.is_empty() {
-                    pricing = pricing.with_litellm_supplement(&litellm_prices);
-                }
-            }
-        }
-    }
 
     // Ingest data with startup progress
     let db_path = Config::db_path();
     let db = Database::open_with_pricing(&db_path, pricing.clone())?;
     let projects_dir = config.projects_dir();
 
-    // Scan all providers
+    // Scan Claude sessions
     let claude_files = scan_projects(&projects_dir)?;
-    let gemini_files = scan_gemini_sessions(&Provider::Gemini.default_dir()).unwrap_or_default();
-    let openclaw_files = scan_openclaw_sessions(&Provider::OpenClaw.default_dir()).unwrap_or_default();
-    let amp_files = scan_amp_sessions(&Provider::Amp.default_dir()).unwrap_or_default();
-    let roo_code_files = scan_roo_code_sessions(&Provider::RooCode.default_dir()).unwrap_or_default();
-    let mux_files = scan_mux_sessions(&Provider::Mux.default_dir()).unwrap_or_default();
-    let kimi_files = scan_kimi_sessions(&Provider::KimiCli.default_dir()).unwrap_or_default();
-    let qwen_files = scan_qwen_sessions(&Provider::QwenCli.default_dir()).unwrap_or_default();
 
-    // Collect all non-Claude provider files with their provider type
-    let other_provider_files: Vec<(&Provider, &aitop::data::scanner::SessionFile)> = [
-        (&Provider::Gemini, gemini_files.as_slice()),
-        (&Provider::OpenClaw, openclaw_files.as_slice()),
-        (&Provider::Amp, amp_files.as_slice()),
-        (&Provider::RooCode, roo_code_files.as_slice()),
-        (&Provider::Mux, mux_files.as_slice()),
-        (&Provider::KimiCli, kimi_files.as_slice()),
-        (&Provider::QwenCli, qwen_files.as_slice()),
-    ]
-    .iter()
-    .flat_map(|(provider, files)| files.iter().map(move |f| (*provider, f)))
-    .collect();
+    // Scan Gemini sessions
+    let gemini_dir = Provider::Gemini.default_dir();
+    let gemini_files = scan_gemini_sessions(&gemini_dir).unwrap_or_default();
 
-    let total_files = claude_files.len() + other_provider_files.len();
+    // Scan OpenClaw sessions
+    let openclaw_dir = Provider::OpenClaw.default_dir();
+    let openclaw_files = scan_openclaw_sessions(&openclaw_dir).unwrap_or_default();
+
+    let total_files = claude_files.len() + gemini_files.len() + openclaw_files.len();
     if total_files > 0 {
         eprint!("\r  Indexing sessions... (parsing {} files)", total_files);
         io::stderr().flush().ok();
@@ -199,28 +135,28 @@ fn main() -> Result<()> {
             }
         }
 
-        // Ingest all other provider files sequentially
-        for (provider, file) in &other_provider_files {
+        // Ingest Gemini files sequentially
+        for file in &gemini_files {
             count += 1;
             eprint!("\r  Indexing sessions... ({}/{} files)", count, total_files);
             io::stderr().flush().ok();
-            if let Err(e) = db.ingest_provider_file(provider, file) {
-                eprintln!("\nWarning: failed to ingest {} {:?}: {}", provider, file.path, e);
+            if let Err(e) = db.ingest_gemini_file(file) {
+                eprintln!("\nWarning: failed to ingest Gemini {:?}: {}", file.path, e);
+            }
+        }
+
+        // Ingest OpenClaw files sequentially
+        for file in &openclaw_files {
+            count += 1;
+            eprint!("\r  Indexing sessions... ({}/{} files)", count, total_files);
+            io::stderr().flush().ok();
+            if let Err(e) = db.ingest_openclaw_file(file) {
+                eprintln!("\nWarning: failed to ingest OpenClaw {:?}: {}", file.path, e);
             }
         }
 
         eprint!("\r{}\r", " ".repeat(60));
         io::stderr().flush().ok();
-    }
-
-    if args.serve {
-        drop(db);
-        return aitop::serve::run(&db_path, &pricing, args.port);
-    }
-
-    if args.json {
-        drop(db);
-        return print_json_mode(&db_path, pricing);
     }
 
     if args.light {
@@ -234,35 +170,6 @@ fn main() -> Result<()> {
     }
 
     run_tui(config, db, &db_path, &projects_dir, pricing)
-}
-
-fn is_cache_stale(path: &std::path::Path) -> bool {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .map(|mtime| mtime.elapsed().unwrap_or_default().as_secs() > 86400)
-        .unwrap_or(true)
-}
-
-#[derive(Serialize)]
-struct JsonOutput {
-    dashboard: aitop::data::aggregator::DashboardStats,
-    models: Vec<aitop::data::aggregator::ModelStats>,
-    sessions: Vec<aitop::data::aggregator::SessionSummary>,
-    daily_spend: Vec<aitop::data::aggregator::DailySpend>,
-    cache_hit_ratio: f64,
-}
-
-fn print_json_mode(db_path: &std::path::Path, pricing: PricingRegistry) -> Result<()> {
-    let agg = Aggregator::open_with_pricing(db_path, pricing)?;
-    let output = JsonOutput {
-        dashboard: agg.dashboard_stats()?,
-        models: agg.model_breakdown()?,
-        sessions: agg.sessions_list(100)?,
-        daily_spend: agg.daily_spend(30)?,
-        cache_hit_ratio: agg.cache_hit_ratio()?,
-    };
-    println!("{}", serde_json::to_string_pretty(&output)?);
-    Ok(())
 }
 
 fn print_light_mode(db_path: &std::path::Path, pricing: PricingRegistry) -> Result<()> {
@@ -363,20 +270,20 @@ fn run_tui(
             _watchers.push(w);
         }
     }
-
-    // Watch all other provider directories
-    for provider in Provider::all() {
-        if *provider == Provider::Claude {
-            continue; // Already handled above
-        }
-        let dir = provider.default_dir();
-        if dir.exists() {
-            if let Ok(w) = watch_directory(&dir, tokio_tx.clone()) {
-                _watchers.push(w);
-            }
+    // Watch Gemini dir
+    let gemini_dir = Provider::Gemini.default_dir();
+    if gemini_dir.exists() {
+        if let Ok(w) = watch_directory(&gemini_dir, tokio_tx.clone()) {
+            _watchers.push(w);
         }
     }
-    drop(tokio_tx); // Drop the original sender
+    // Watch OpenClaw dir
+    let openclaw_dir = Provider::OpenClaw.default_dir();
+    if openclaw_dir.exists() {
+        if let Ok(w) = watch_directory(&openclaw_dir, tokio_tx) {
+            _watchers.push(w);
+        }
+    }
 
     let bridge_tx = watcher_tx;
     std::thread::spawn(move || {
@@ -501,25 +408,40 @@ fn run_event_loop(
         // Check for file watcher events
         let mut got_fs_event = false;
         while let Ok(path) = watcher_rx.try_recv() {
-            // Route to correct provider using path_matches
-            let result = if let Some(provider) = Provider::all().iter().find(|p| p.path_matches(&path)) {
-                match provider {
-                    Provider::Claude => write_db.ingest_file_by_path(&path),
-                    other => {
-                        let file_path = std::path::PathBuf::from(&path);
-                        let (project, session_id) = derive_project_and_session(other, &file_path);
-                        let sf = aitop::data::scanner::SessionFile {
-                            path: file_path,
-                            session_id,
-                            project: project.clone(),
-                        };
-                        write_db.ingest_provider_file(other, &sf).map(|_| (project, 0u64))
-                    }
-                }
+            let result = if path.contains("/.gemini/") {
+                // Gemini session file — derive project from path
+                let file_path = std::path::PathBuf::from(&path);
+                let project = file_path
+                    .ancestors()
+                    .find(|p| p.parent().map(|pp| pp.file_name().and_then(|n| n.to_str()) == Some("tmp")).unwrap_or(false))
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("gemini")
+                    .to_string();
+                let sf = aitop::data::scanner::SessionFile {
+                    path: file_path.clone(),
+                    session_id: file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string(),
+                    project: project.clone(),
+                };
+                write_db.ingest_gemini_file(&sf).map(|_| (project, 0u64))
+            } else if path.contains("/.openclaw/") {
+                let file_path = std::path::PathBuf::from(&path);
+                let project = file_path
+                    .ancestors()
+                    .find(|p| p.parent().map(|pp| pp.file_name().and_then(|n| n.to_str()) == Some("agents")).unwrap_or(false))
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("openclaw")
+                    .to_string();
+                let sf = aitop::data::scanner::SessionFile {
+                    path: file_path.clone(),
+                    session_id: file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string(),
+                    project: project.clone(),
+                };
+                write_db.ingest_openclaw_file(&sf).map(|_| (project, 0u64))
             } else {
                 write_db.ingest_file_by_path(&path)
             };
-
             if let Ok((project, _offset)) = result {
                 state.last_live_event = Some(Instant::now());
                 state.live_project = Some(project);
@@ -547,67 +469,6 @@ fn run_event_loop(
     }
 
     Ok(())
-}
-
-/// Derive project name and session ID from a file path based on provider conventions.
-fn derive_project_and_session(provider: &Provider, path: &std::path::Path) -> (String, String) {
-    let session_id = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string();
-
-    let project = match provider {
-        Provider::Gemini => {
-            // ~/.gemini/tmp/<project>/chats/<session>.json
-            path.ancestors()
-                .find(|p| p.parent().map(|pp| pp.file_name().and_then(|n| n.to_str()) == Some("tmp")).unwrap_or(false))
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or("gemini")
-                .to_string()
-        }
-        Provider::OpenClaw => {
-            // ~/.openclaw/agents/<agent>/sessions/<session>.jsonl
-            path.ancestors()
-                .find(|p| p.parent().map(|pp| pp.file_name().and_then(|n| n.to_str()) == Some("agents")).unwrap_or(false))
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or("openclaw")
-                .to_string()
-        }
-        Provider::Amp => "amp".to_string(),
-        Provider::RooCode => "roo-code".to_string(),
-        Provider::Mux => "mux".to_string(),
-        Provider::KimiCli => {
-            // ~/.kimi/sessions/<group>/<uuid>/wire.jsonl
-            path.parent()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or("kimi")
-                .to_string()
-        }
-        Provider::QwenCli => {
-            // ~/.qwen/projects/<project>/chats/<chat>.jsonl
-            path.ancestors()
-                .find(|p| p.file_name().and_then(|n| n.to_str()) == Some("chats"))
-                .and_then(|p| p.parent())
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or("qwen")
-                .to_string()
-        }
-        Provider::Claude => {
-            path.parent()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or("claude")
-                .to_string()
-        }
-    };
-
-    (project, session_id)
 }
 
 fn handle_key(

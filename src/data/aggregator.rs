@@ -1,13 +1,12 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
-use serde::Serialize;
 use std::path::Path;
 
 use super::pricing::PricingRegistry;
 use crate::ui::format::shorten_model;
 
 /// Top-level stats for the dashboard.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default)]
 pub struct DashboardStats {
     pub burn_rate_per_hour: f64,
     pub spend_today: f64,
@@ -21,7 +20,7 @@ pub struct DashboardStats {
 }
 
 /// Per-model breakdown.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct ModelStats {
     pub model: String,
     pub cost: f64,
@@ -34,7 +33,7 @@ pub struct ModelStats {
 }
 
 /// Session summary for the sessions list.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct SessionSummary {
     pub id: String,
     pub project: String,
@@ -48,7 +47,7 @@ pub struct SessionSummary {
 }
 
 /// Daily spend data point.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct DailySpend {
     pub date: String,
     pub cost: f64,
@@ -153,15 +152,6 @@ impl Aggregator {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         Ok(Aggregator { conn, pricing })
-    }
-
-    pub fn is_live(&self) -> Result<bool> {
-        let exists: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM messages WHERE timestamp >= datetime('now', '-5 minutes'))",
-            [],
-            |row| row.get(0),
-        )?;
-        Ok(exists)
     }
 
     pub fn dashboard_stats(&self) -> Result<DashboardStats> {
