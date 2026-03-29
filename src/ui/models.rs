@@ -3,7 +3,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
-use super::format::{braille_bar, format_tokens, shorten_model};
+use super::format::{braille_bar_spans, format_tokens, shorten_model};
 use super::theme::Theme;
 use super::widgets::cost_color::cost_color;
 use super::widgets::title::shortcut_title;
@@ -61,16 +61,14 @@ pub fn render_models(f: &mut Frame, state: &AppState, theme: &Theme) {
 
         // Line 2: Progress bar + percentage
         let ratio = if max_cost > 0.0 { model.cost / max_cost } else { 0.0 };
-        let (bar, empty) = braille_bar(ratio, bar_width);
-        lines.push(Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(bar, Style::default().fg(theme.bar_filled)),
-            Span::styled(empty, Style::default().fg(theme.bar_empty)),
-            Span::styled(
-                format!(" {:.1}%", pct),
-                Style::default().fg(theme.text_dim),
-            ),
-        ]));
+        let gradient = [theme.bar_low, theme.bar_mid, theme.bar_high];
+        let mut bar_spans = vec![Span::styled("  ", Style::default())];
+        bar_spans.extend(braille_bar_spans(ratio, bar_width, pct, gradient));
+        bar_spans.push(Span::styled(
+            format!(" {:.1}%", pct),
+            Style::default().fg(theme.text_dim),
+        ));
+        lines.push(Line::from(bar_spans));
 
         // Line 3: Detail stats
         let cache_total = model.cache_read + model.input_tokens + model.cache_creation;

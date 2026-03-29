@@ -15,6 +15,9 @@ pub struct Theme {
     pub text_dim: Color,     // secondary text
     pub bar_filled: Color,   // progress bar fill
     pub bar_empty: Color,    // progress bar background
+    pub bar_low: Color,      // bar gradient: low portion
+    pub bar_mid: Color,      // bar gradient: middle portion
+    pub bar_high: Color,     // bar gradient: high portion
 }
 
 pub fn get_theme(name: &str) -> Theme {
@@ -31,6 +34,9 @@ pub fn get_theme(name: &str) -> Theme {
             text_dim: Color::Rgb(129, 161, 193),   // nord9
             bar_filled: Color::Rgb(136, 192, 208),
             bar_empty: Color::Rgb(59, 66, 82),
+            bar_low: Color::Rgb(163, 190, 140),     // nord14 green
+            bar_mid: Color::Rgb(235, 203, 139),     // nord13 yellow
+            bar_high: Color::Rgb(191, 97, 106),     // nord11 red
         },
         "dracula" => Theme {
             name: "dracula",
@@ -44,6 +50,9 @@ pub fn get_theme(name: &str) -> Theme {
             text_dim: Color::Rgb(98, 114, 164),
             bar_filled: Color::Rgb(189, 147, 249), // purple
             bar_empty: Color::Rgb(68, 71, 90),
+            bar_low: Color::Rgb(80, 250, 123),      // green
+            bar_mid: Color::Rgb(241, 250, 140),     // yellow
+            bar_high: Color::Rgb(255, 85, 85),      // red
         },
         "gruvbox" => Theme {
             name: "gruvbox",
@@ -57,6 +66,9 @@ pub fn get_theme(name: &str) -> Theme {
             text_dim: Color::Rgb(168, 153, 132),
             bar_filled: Color::Rgb(254, 128, 25),
             bar_empty: Color::Rgb(60, 56, 54),
+            bar_low: Color::Rgb(184, 187, 38),      // green
+            bar_mid: Color::Rgb(250, 189, 47),      // yellow
+            bar_high: Color::Rgb(251, 73, 52),      // red
         },
         "catppuccin" => Theme {
             name: "catppuccin",
@@ -70,6 +82,9 @@ pub fn get_theme(name: &str) -> Theme {
             text_dim: Color::Rgb(147, 153, 178),   // overlay1
             bar_filled: Color::Rgb(203, 166, 247), // mauve
             bar_empty: Color::Rgb(49, 50, 68),     // mantle
+            bar_low: Color::Rgb(166, 227, 161),    // green
+            bar_mid: Color::Rgb(249, 226, 175),    // yellow
+            bar_high: Color::Rgb(243, 139, 168),   // red
         },
         "mono" => Theme {
             name: "mono",
@@ -83,6 +98,9 @@ pub fn get_theme(name: &str) -> Theme {
             text_dim: Color::Gray,
             bar_filled: Color::White,
             bar_empty: Color::DarkGray,
+            bar_low: Color::Green,
+            bar_mid: Color::Yellow,
+            bar_high: Color::Red,
         },
         _ => Theme {
             // "ember" - default
@@ -97,6 +115,9 @@ pub fn get_theme(name: &str) -> Theme {
             text_dim: Color::Rgb(160, 160, 160),   // light gray
             bar_filled: Color::Rgb(255, 107, 53),
             bar_empty: Color::Rgb(50, 50, 50),
+            bar_low: Color::Rgb(0, 230, 118),       // green
+            bar_mid: Color::Rgb(255, 230, 109),     // gold
+            bar_high: Color::Rgb(255, 23, 68),      // red
         },
     }
 }

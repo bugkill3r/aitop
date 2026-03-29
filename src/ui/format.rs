@@ -1,4 +1,6 @@
 use chrono::{DateTime, Utc};
+use ratatui::style::{Color, Style};
+use ratatui::text::Span;
 
 /// Format a token count into a human-readable short string (e.g., "1.5K", "2.3M").
 pub fn format_tokens(n: i64) -> String {
@@ -48,26 +50,81 @@ pub fn format_relative_time(iso: &str) -> String {
     }
 }
 
-/// Build a braille-style horizontal bar.
-/// Returns (filled_string, empty_string) for the given ratio (0.0–1.0) and total width.
-pub fn braille_bar(ratio: f64, width: usize) -> (String, String) {
-    let exact = ratio * width as f64;
-    let full = exact as usize;
-    let frac = exact - full as f64;
+/// Build a braille waveform bar with color based on the item's share.
+/// `ratio` = bar fill (0.0–1.0 relative to max item).
+/// `share` = this item's percentage of the total (0.0–100.0), determines color.
+/// Returns Vec of colored Spans for the bar + empty space.
+pub fn braille_bar_spans<'a>(
+    ratio: f64,
+    width: usize,
+    share: f64,
+    colors: [Color; 3], // [low, mid, high]
+) -> Vec<Span<'a>> {
+    let filled_len = (ratio.clamp(0.0, 1.0) * width as f64).round() as usize;
+    let remaining = width.saturating_sub(filled_len);
 
-    let mut bar = String::with_capacity(width * 3);
-    for _ in 0..full {
-        bar.push('\u{28FF}'); // ⣿ all 8 dots
+    // Both-column braille — no jitter, all use both dot columns:
+    // ⣀ (1 row) → ⣤ (2 rows) → ⣶ (3 rows) → ⣿ (4 rows/full)
+    const HEIGHTS: [char; 4] = [
+        '\u{28C0}', '\u{28E4}', '\u{28F6}', '\u{28FF}',
+    ];
+    if filled_len == 0 {
+        return vec![Span::raw(" ".repeat(remaining))];
     }
 
-    let remaining = width.saturating_sub(full);
-    if remaining > 0 && frac > 0.1 {
-        bar.push('\u{2847}'); // ⡇ left column only
-        let empty: String = " ".repeat(remaining - 1);
-        (bar, empty)
+    // How far along the gradient this item reaches based on its share
+    // 80% share → gradient goes all the way to red
+    // 5% share → gradient stays near green
+    let gradient_end = (share / 100.0).clamp(0.0, 1.0).sqrt(); // sqrt for a more visible spread
+
+    // Waveform offsets for organic variation on top of growing base
+    const WAVE: [i8; 13] = [0, -1, 0, 1, 0, 0, -1, 1, 0, -1, 0, 1, 0];
+
+    let mut spans = Vec::new();
+    for i in 0..filled_len {
+        let t = if filled_len > 1 {
+            (i as f64 / (filled_len - 1) as f64) * gradient_end
+        } else {
+            gradient_end
+        };
+
+        let color = lerp_color_3(colors, t);
+
+        // Growing base height (thin → thick) with waveform variation
+        let progress = if filled_len > 1 { i as f64 / (filled_len - 1) as f64 } else { 1.0 };
+        let base = (progress * 3.0) as i8; // grows 0→3
+        let h = (base + WAVE[i % WAVE.len()]).clamp(0, 3) as usize;
+        let ch = HEIGHTS[h];
+        spans.push(Span::styled(
+            String::from(ch),
+            Style::default().fg(color),
+        ));
+    }
+
+    if remaining > 0 {
+        spans.push(Span::raw(" ".repeat(remaining)));
+    }
+
+    spans
+}
+
+/// Linearly interpolate across 3 colors. t=0 → colors[0], t=0.5 → colors[1], t=1 → colors[2].
+fn lerp_color_3(colors: [Color; 3], t: f64) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let (from, to, local_t) = if t < 0.5 {
+        (colors[0], colors[1], t * 2.0)
     } else {
-        let empty: String = " ".repeat(remaining);
-        (bar, empty)
+        (colors[1], colors[2], (t - 0.5) * 2.0)
+    };
+
+    if let (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) = (from, to) {
+        let r = (r1 as f64 + (r2 as f64 - r1 as f64) * local_t).round() as u8;
+        let g = (g1 as f64 + (g2 as f64 - g1 as f64) * local_t).round() as u8;
+        let b = (b1 as f64 + (b2 as f64 - b1 as f64) * local_t).round() as u8;
+        Color::Rgb(r, g, b)
+    } else {
+        // Fallback for non-RGB colors: snap to nearest
+        if t < 0.33 { colors[0] } else if t < 0.66 { colors[1] } else { colors[2] }
     }
 }
 

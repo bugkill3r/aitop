@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
 use ratatui::Frame;
 
-use super::format::{braille_bar, format_relative_time, format_tokens, shorten_model, truncate};
+use super::format::{braille_bar_spans, format_relative_time, format_tokens, shorten_model, truncate};
 use super::layout::{dashboard_layout, layout_tier, LayoutTier};
 use super::theme::Theme;
 use super::widgets::cost_color::cost_color;
@@ -373,23 +373,25 @@ fn render_model_breakdown(f: &mut Frame, state: &AppState, theme: &Theme, area: 
         let bar_width = (inner.width as usize).saturating_sub(name_col + 16);
 
         let mut lines = Vec::new();
+        let gradient = [theme.bar_low, theme.bar_mid, theme.bar_high];
+        let total_cost: f64 = state.models.iter().map(|m| m.cost).sum();
         for model in &state.models {
             let short_name = shorten_model(&model.model);
             let ratio = if max_cost > 0.0 { model.cost / max_cost } else { 0.0 };
-            let (bar, empty) = braille_bar(ratio, bar_width);
+            let share = if total_cost > 0.0 { model.cost / total_cost * 100.0 } else { 0.0 };
 
-            lines.push(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(
                     format!("  {:<width$}", short_name, width = name_col),
                     Style::default().fg(theme.text),
                 ),
-                Span::styled(bar, Style::default().fg(theme.bar_filled)),
-                Span::styled(empty, Style::default().fg(theme.bar_empty)),
-                Span::styled(
-                    format!(" ${:.2}", model.cost),
-                    Style::default().fg(cost_color(model.cost)).add_modifier(Modifier::BOLD),
-                ),
-            ]));
+            ];
+            spans.extend(braille_bar_spans(ratio, bar_width, share, gradient));
+            spans.push(Span::styled(
+                format!(" ${:.2}", model.cost),
+                Style::default().fg(cost_color(model.cost)).add_modifier(Modifier::BOLD),
+            ));
+            lines.push(Line::from(spans));
         }
 
         f.render_widget(Paragraph::new(lines), inner);
@@ -422,26 +424,26 @@ fn render_project_costs(f: &mut Frame, state: &AppState, theme: &Theme, area: Re
     let bar_width = (inner.width as usize).saturating_sub(34);
 
     let mut lines = Vec::new();
+    let gradient = [theme.bar_low, theme.bar_mid, theme.bar_high];
     for pc in state.project_costs.iter().take(inner.height as usize) {
         let ratio = if max_cost > 0.0 { pc.cost / max_cost } else { 0.0 };
-        let (bar, empty) = braille_bar(ratio, bar_width);
 
-        lines.push(Line::from(vec![
+        let mut spans = vec![
             Span::styled(
                 format!("  {:<14}", truncate(&pc.name, 14)),
                 Style::default().fg(theme.text),
             ),
-            Span::styled(bar, Style::default().fg(theme.secondary)),
-            Span::styled(empty, Style::default()),
-            Span::styled(
-                format!(" ${:<6.0}", pc.cost),
-                Style::default().fg(theme.tertiary).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("({:.0}%)", pc.percentage),
-                Style::default().fg(theme.text_dim),
-            ),
-        ]));
+        ];
+        spans.extend(braille_bar_spans(ratio, bar_width, pc.percentage, gradient));
+        spans.push(Span::styled(
+            format!(" ${:<6.0}", pc.cost),
+            Style::default().fg(theme.tertiary).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!("({:.0}%)", pc.percentage),
+            Style::default().fg(theme.text_dim),
+        ));
+        lines.push(Line::from(spans));
     }
 
     f.render_widget(Paragraph::new(lines), inner);
