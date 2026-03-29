@@ -86,9 +86,9 @@ struct MenuBarView: View {
 
     private var spendGrid: some View {
         HStack(spacing: 10) {
-            spendCard("Burn Rate", Theme.formatRate(store.stats.burnRatePerHour), prominent: false)
-            spendCard("Week", Theme.formatCurrency(store.stats.spendThisWeek), prominent: false)
-            spendCard("All Time", Theme.formatCurrency(store.stats.spendAllTime), prominent: false)
+            spendCard("/hr", Theme.formatCurrency(store.stats.burnRatePerHour), prominent: false)
+            spendCard("/wk", Theme.formatCurrency(store.stats.spendThisWeek), prominent: false)
+            spendCard("total", Theme.formatCurrency(store.stats.spendAllTime), prominent: false)
         }
     }
 

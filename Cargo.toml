@@ -1,7 +1,8 @@
 [package]
 name = "aitop"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
+authors = ["Saurabh Mishra <saurabh@bugkill3r.com>"]
 description = "btop for AI — terminal dashboard for token usage and costs"
 license = "MIT"
 repository = "https://github.com/bugkill3r/aitop"
@@ -9,7 +10,7 @@ homepage = "https://github.com/bugkill3r/aitop"
 readme = "README.md"
 keywords = ["ai", "terminal", "dashboard", "claude", "tui"]
 categories = ["command-line-utilities", "visualization"]
-exclude = [".github/", ".claude/", "docs/", "npm/", "homebrew/"]
+exclude = [".github/", ".claude/", "docs/", "npm/", "homebrew/", "menubar/"]
 
 [dependencies]
 ratatui = "0.29"
@@ -26,6 +27,7 @@ clap = { version = "4", features = ["derive"] }
 urlencoding = "2"
 anyhow = "1"
 rayon = "1"
+ureq = "3"
 
 [dev-dependencies]
 tempfile = "3"

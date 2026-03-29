@@ -2,6 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/aitop.svg)](https://crates.io/crates/aitop)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-pink)](https://github.com/sponsors/bugkill3r)
 
 **btop for AI** — a terminal dashboard for monitoring AI token usage, costs, and sessions.
 
@@ -155,6 +156,14 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and PR gu
 ## Tech Stack
 
 Rust, Ratatui, Crossterm, SQLite (rusqlite), notify (fs watcher), Tokio
+
+## Support
+
+If aitop saves you from bill shock, consider [sponsoring the project](https://github.com/sponsors/bugkill3r).
+
+## Author
+
+**Saurabh Mishra** — [@bugkill3r](https://github.com/bugkill3r)
 
 ## License
 
