@@ -25,6 +25,9 @@ pub struct Config {
 
     #[serde(default)]
     pub model_pricing: HashMap<String, ModelPriceConfig>,
+
+    /// Enable automatic pricing updates from LiteLLM on startup (cached 24h)
+    pub auto_update_pricing: Option<bool>,
 }
 
 fn default_refresh() -> f64 {
@@ -45,6 +48,7 @@ impl Default for Config {
             data_dir: None,
             admin_api_key: None,
             model_pricing: HashMap::new(),
+            auto_update_pricing: None,
         }
     }
 }

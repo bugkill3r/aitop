@@ -179,6 +179,18 @@ impl PricingRegistry {
         registry
     }
 
+    /// Supplement the registry with LiteLLM pricing entries at the lowest priority.
+    /// LiteLLM entries only apply if no builtin or user-override rule matches.
+    pub fn with_litellm_supplement(mut self, litellm_prices: &HashMap<String, ModelPrice>) -> Self {
+        for (pattern, price) in litellm_prices {
+            self.rules.push(PricingRule {
+                pattern: pattern.clone(),
+                price: price.clone(),
+            });
+        }
+        self
+    }
+
     /// Look up pricing for a model string. Matches the first rule whose
     /// pattern is a case-insensitive substring of the model name.
     pub fn lookup(&self, model: &str) -> &ModelPrice {
