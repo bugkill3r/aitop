@@ -138,14 +138,12 @@ function addSpendCard(parent, value, label) {
   card.centerAlignContent();
   card.backgroundColor = C.card;
   card.cornerRadius = 8;
-  card.setPadding(8, 10, 8, 10);
-  card.size = new Size(0, 0);
+  card.setPadding(8, 12, 8, 12);
 
   const v = card.addText(value);
   v.font = F.cardVal;
   v.textColor = C.white;
   v.lineLimit = 1;
-  v.minimumScaleFactor = 0.7;
 
   card.addSpacer(2);
 
