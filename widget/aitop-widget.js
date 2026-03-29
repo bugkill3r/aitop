@@ -35,7 +35,7 @@ const F = {
   tiny:       Font.systemFont(10),
   tinyBold:   Font.boldSystemFont(10),
   tiniest:    Font.systemFont(9),
-  modelName:  Font.monospacedSystemFont(11, 0.3),
+  modelName:  Font.regularMonospacedSystemFont(11),
   modelCost:  Font.boldMonospacedSystemFont(11),
   sessionProj:Font.mediumSystemFont(11),
   sessionDim: Font.systemFont(10),
@@ -425,7 +425,7 @@ function buildNoData() {
   w.addSpacer(4);
 
   const hint = w.addText("Run: aitop --serve");
-  hint.font = Font.monospacedSystemFont(10, 0.3);
+  hint.font = Font.regularMonospacedSystemFont(10);
   hint.textColor = C.dim;
 
   w.addSpacer();
