@@ -6,13 +6,13 @@
 
 **btop for AI** — a terminal dashboard for monitoring AI token usage, costs, and sessions.
 
-![Dashboard](https://raw.githubusercontent.com/bugkill3r/aitop/master/assets/screenshot-dashboard.png)
+![Dashboard](assets/screenshot-dashboard.png)
 
 Like `btop` monitors your system resources, `aitop` monitors your AI spend. Built for developers who live in the terminal and want to keep an eye on their Claude Code, Gemini CLI, and OpenClaw costs without leaving it.
 
 ## Menu Bar App (macOS)
 
-![Menu Bar](https://raw.githubusercontent.com/bugkill3r/aitop/master/assets/menubar.png)
+![Menu Bar](assets/menubar.png)
 
 A native macOS menu bar companion that shows your AI spend at a glance. Flame icon (solid = live, outline = idle), click to see burn rate, model breakdown, recent sessions, and cache efficiency. Reads directly from aitop's SQLite DB — no network calls, no aitop process required.
 
@@ -42,10 +42,10 @@ Enable **Launch at Login** in the app's settings to start automatically on boot.
 <summary>More screenshots</summary>
 
 ### Sessions
-![Sessions](https://raw.githubusercontent.com/bugkill3r/aitop/master/assets/screenshot-sessions.png)
+![Sessions](assets/screenshot-sessions.png)
 
 ### Trends
-![Trends](https://raw.githubusercontent.com/bugkill3r/aitop/master/assets/screenshot-trends.png)
+![Trends](assets/screenshot-trends.png)
 
 </details>
 
