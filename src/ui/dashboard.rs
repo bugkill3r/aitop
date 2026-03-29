@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
 use ratatui::Frame;
 
-use super::format::{format_relative_time, format_tokens, shorten_model, truncate};
+use super::format::{braille_bar, format_relative_time, format_tokens, shorten_model, truncate};
 use super::layout::{dashboard_layout, layout_tier, LayoutTier};
 use super::theme::Theme;
 use super::widgets::cost_color::cost_color;
@@ -375,13 +375,8 @@ fn render_model_breakdown(f: &mut Frame, state: &AppState, theme: &Theme, area: 
         let mut lines = Vec::new();
         for model in &state.models {
             let short_name = shorten_model(&model.model);
-            let bar_len = if max_cost > 0.0 {
-                ((model.cost / max_cost) * bar_width as f64) as usize
-            } else {
-                0
-            };
-            let bar: String = "\u{2588}".repeat(bar_len);
-            let empty: String = "\u{2591}".repeat(bar_width.saturating_sub(bar_len));
+            let ratio = if max_cost > 0.0 { model.cost / max_cost } else { 0.0 };
+            let (bar, empty) = braille_bar(ratio, bar_width);
 
             lines.push(Line::from(vec![
                 Span::styled(
@@ -428,13 +423,8 @@ fn render_project_costs(f: &mut Frame, state: &AppState, theme: &Theme, area: Re
 
     let mut lines = Vec::new();
     for pc in state.project_costs.iter().take(inner.height as usize) {
-        let bar_len = if max_cost > 0.0 {
-            ((pc.cost / max_cost) * bar_width as f64) as usize
-        } else {
-            0
-        };
-        let bar: String = "\u{2588}".repeat(bar_len);
-        let empty: String = " ".repeat(bar_width.saturating_sub(bar_len));
+        let ratio = if max_cost > 0.0 { pc.cost / max_cost } else { 0.0 };
+        let (bar, empty) = braille_bar(ratio, bar_width);
 
         lines.push(Line::from(vec![
             Span::styled(

@@ -3,7 +3,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
-use super::format::{format_tokens, shorten_model};
+use super::format::{braille_bar, format_tokens, shorten_model};
 use super::theme::Theme;
 use super::widgets::cost_color::cost_color;
 use super::widgets::title::shortcut_title;
@@ -60,13 +60,8 @@ pub fn render_models(f: &mut Frame, state: &AppState, theme: &Theme) {
         ]));
 
         // Line 2: Progress bar + percentage
-        let bar_len = if max_cost > 0.0 {
-            ((model.cost / max_cost) * bar_width as f64) as usize
-        } else {
-            0
-        };
-        let bar: String = "█".repeat(bar_len);
-        let empty: String = "░".repeat(bar_width.saturating_sub(bar_len));
+        let ratio = if max_cost > 0.0 { model.cost / max_cost } else { 0.0 };
+        let (bar, empty) = braille_bar(ratio, bar_width);
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(bar, Style::default().fg(theme.bar_filled)),

@@ -48,6 +48,29 @@ pub fn format_relative_time(iso: &str) -> String {
     }
 }
 
+/// Build a braille-style horizontal bar.
+/// Returns (filled_string, empty_string) for the given ratio (0.0–1.0) and total width.
+pub fn braille_bar(ratio: f64, width: usize) -> (String, String) {
+    let exact = ratio * width as f64;
+    let full = exact as usize;
+    let frac = exact - full as f64;
+
+    let mut bar = String::with_capacity(width * 3);
+    for _ in 0..full {
+        bar.push('\u{28FF}'); // ⣿ all 8 dots
+    }
+
+    let remaining = width.saturating_sub(full);
+    if remaining > 0 && frac > 0.1 {
+        bar.push('\u{2847}'); // ⡇ left column only
+        let empty: String = " ".repeat(remaining - 1);
+        (bar, empty)
+    } else {
+        let empty: String = " ".repeat(remaining);
+        (bar, empty)
+    }
+}
+
 /// Truncate a string to `max` characters, appending "\u{2026}" if truncated.
 pub fn truncate(s: &str, max: usize) -> String {
     if s.len() > max {
