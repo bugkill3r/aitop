@@ -268,8 +268,7 @@ fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: ratat
     let gradient_colors = [theme.bar_low, theme.bar_mid, theme.bar_high];
 
     // For each char_col, find the max total_height across its 2 dot columns
-    let mut col_heights = vec![0usize; w];
-    for char_col in 0..w {
+    let col_heights: Vec<usize> = (0..w).map(|char_col| {
         let mut max_h = 0usize;
         for dc in 0..2 {
             let x = char_col * 2 + dc;
@@ -280,14 +279,14 @@ fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: ratat
             let oh = if y_max > 0.0 { (output_val / y_max * dot_rows as f64).round() as usize } else { 0 };
             max_h = max_h.max(ih + oh);
         }
-        col_heights[char_col] = max_h;
-    }
+        max_h
+    }).collect();
 
     let mut lines = Vec::with_capacity(h);
 
     for char_row in 0..h {
         let mut spans = Vec::new();
-        for char_col in 0..w {
+        for (char_col, &col_h) in col_heights.iter().enumerate() {
             let mut braille: u16 = 0x2800;
             let dot_bits: [[u16; 4]; 2] = [
                 [0x01, 0x02, 0x04, 0x40],
@@ -320,7 +319,6 @@ fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: ratat
 
             let ch = char::from_u32(braille as u32).unwrap_or(' ');
             let color = if has_data {
-                let col_h = col_heights[char_col];
                 // Where is this cell row within the column's data? (0=bottom, 1=top of data)
                 let cell_bottom = dot_rows.saturating_sub((char_row + 1) * 4);
                 let t = if col_h > 0 { (cell_bottom as f64 / col_h as f64).clamp(0.0, 1.0) } else { 0.0 };
