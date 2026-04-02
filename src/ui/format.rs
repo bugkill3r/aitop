@@ -109,7 +109,7 @@ pub fn braille_bar_spans<'a>(
 }
 
 /// Linearly interpolate across 3 colors. t=0 → colors[0], t=0.5 → colors[1], t=1 → colors[2].
-fn lerp_color_3(colors: [Color; 3], t: f64) -> Color {
+pub fn lerp_color_3(colors: [Color; 3], t: f64) -> Color {
     let t = t.clamp(0.0, 1.0);
     let (from, to, local_t) = if t < 0.5 {
         (colors[0], colors[1], t * 2.0)

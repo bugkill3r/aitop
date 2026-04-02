@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
 use ratatui::Frame;
 
-use super::format::{braille_bar_spans, format_relative_time, format_tokens, shorten_model, truncate};
+use super::format::{braille_bar_spans, format_relative_time, format_tokens, lerp_color_3, shorten_model, truncate};
 use super::layout::{dashboard_layout, layout_tier, LayoutTier};
 use super::theme::Theme;
 use super::widgets::cost_color::cost_color;
@@ -210,12 +210,7 @@ fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: ratat
         .border_style(Style::default().fg(theme.muted))
         .title({
             let mut t = panel_title("Token Flow ", theme).spans;
-            t.extend([
-                Span::styled("(last hour) ", Style::default().fg(theme.text_dim)),
-                Span::styled("in", Style::default().fg(theme.secondary)),
-                Span::styled("/", Style::default().fg(theme.muted)),
-                Span::styled("out", Style::default().fg(theme.tertiary)),
-            ]);
+            t.push(Span::styled("(last hour)", Style::default().fg(theme.text_dim)));
             Line::from(t)
         });
 
@@ -268,7 +263,26 @@ fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: ratat
         data[i].1 * (1.0 - t) + data[i + 1].1 * t
     };
 
-    // Build braille grid
+    // Pre-compute per-column: total height and braille bits per cell row
+    // So we can color each cell by its vertical position within that column's data
+    let gradient_colors = [theme.bar_low, theme.bar_mid, theme.bar_high];
+
+    // For each char_col, find the max total_height across its 2 dot columns
+    let mut col_heights = vec![0usize; w];
+    for char_col in 0..w {
+        let mut max_h = 0usize;
+        for dc in 0..2 {
+            let x = char_col * 2 + dc;
+            if x >= dot_cols { continue; }
+            let input_val = interpolate(&chart_data.input_data, x);
+            let output_val = interpolate(&chart_data.output_data, x);
+            let ih = if y_max > 0.0 { (input_val / y_max * dot_rows as f64).round() as usize } else { 0 };
+            let oh = if y_max > 0.0 { (output_val / y_max * dot_rows as f64).round() as usize } else { 0 };
+            max_h = max_h.max(ih + oh);
+        }
+        col_heights[char_col] = max_h;
+    }
+
     let mut lines = Vec::with_capacity(h);
 
     for char_row in 0..h {
@@ -280,8 +294,7 @@ fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: ratat
                 [0x08, 0x10, 0x20, 0x80],
             ];
 
-            let mut has_input = false;
-            let mut has_output = false;
+            let mut has_data = false;
 
             for (dc, col_bits) in dot_bits.iter().enumerate() {
                 let x = char_col * 2 + dc;
@@ -290,7 +303,6 @@ fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: ratat
                 let input_val = interpolate(&chart_data.input_data, x);
                 let output_val = interpolate(&chart_data.output_data, x);
 
-                // Stacked: input fills 0..input_height, output fills input_height..input_height+output_height
                 let input_height = if y_max > 0.0 { (input_val / y_max * dot_rows as f64).round() as usize } else { 0 };
                 let output_height = if y_max > 0.0 { (output_val / y_max * dot_rows as f64).round() as usize } else { 0 };
                 let total_height = input_height + output_height;
@@ -299,27 +311,20 @@ fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: ratat
                     let grid_row = char_row * 4 + dr;
                     let from_bottom = dot_rows.saturating_sub(1).saturating_sub(grid_row);
 
-                    if from_bottom < input_height {
-                        // In the input zone (bottom)
+                    if from_bottom < total_height {
                         braille |= bit;
-                        has_input = true;
-                    } else if from_bottom < total_height {
-                        // In the output zone (stacked on top of input)
-                        braille |= bit;
-                        has_output = true;
+                        has_data = true;
                     }
                 }
             }
 
             let ch = char::from_u32(braille as u32).unwrap_or(' ');
-            // Color by dominant zone in this cell
-            let color = if has_output && !has_input {
-                theme.tertiary
-            } else if has_input && !has_output {
-                theme.secondary
-            } else if has_input && has_output {
-                // Mixed cell: use accent to show overlap boundary
-                theme.secondary
+            let color = if has_data {
+                let col_h = col_heights[char_col];
+                // Where is this cell row within the column's data? (0=bottom, 1=top of data)
+                let cell_bottom = dot_rows.saturating_sub((char_row + 1) * 4);
+                let t = if col_h > 0 { (cell_bottom as f64 / col_h as f64).clamp(0.0, 1.0) } else { 0.0 };
+                lerp_color_3(gradient_colors, t)
             } else {
                 theme.bar_empty
             };
@@ -563,39 +568,48 @@ pub struct TokenFlowChartData {
 }
 
 /// Prepare dual-line chart data from token flow points.
+/// Pads to 60 minutes so gaps without activity show as zero.
 pub fn prepare_token_flow_data(
     flow: &[crate::data::aggregator::TokenFlowPoint],
 ) -> TokenFlowChartData {
     if flow.is_empty() {
         return TokenFlowChartData {
-            input_data: vec![(0.0, 0.0)],
-            output_data: vec![(0.0, 0.0)],
+            input_data: vec![(0.0, 0.0); 60],
+            output_data: vec![(0.0, 0.0); 60],
             max_value: 1.0,
         };
     }
 
-    let input_data: Vec<(f64, f64)> = flow
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (i as f64, p.input_tokens as f64))
-        .collect();
+    // Build a lookup from "HH:MM" → (input, output)
+    let mut minute_map: std::collections::HashMap<&str, (i64, i64)> =
+        std::collections::HashMap::new();
+    for p in flow {
+        minute_map.insert(&p.minute, (p.input_tokens, p.output_tokens));
+    }
 
-    let output_data: Vec<(f64, f64)> = flow
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (i as f64, p.output_tokens as f64))
-        .collect();
+    // Generate 60 minutes ending at now
+    let now = chrono::Local::now();
+    let mut input_data = Vec::with_capacity(60);
+    let mut output_data = Vec::with_capacity(60);
+    let mut max_val = 1i64;
 
-    let max_val = flow
-        .iter()
-        .map(|p| p.input_tokens.max(p.output_tokens))
-        .max()
-        .unwrap_or(1) as f64;
+    for i in 0..60 {
+        let t = now - chrono::Duration::minutes(59 - i);
+        let key = t.format("%H:%M").to_string();
+        let (inp, out) = minute_map
+            .iter()
+            .find(|(k, _)| **k == key.as_str())
+            .map(|(_, v)| *v)
+            .unwrap_or((0, 0));
+        input_data.push((i as f64, inp as f64));
+        output_data.push((i as f64, out as f64));
+        max_val = max_val.max(inp.max(out));
+    }
 
     TokenFlowChartData {
         input_data,
         output_data,
-        max_value: max_val.max(1.0),
+        max_value: max_val as f64,
     }
 }
 
@@ -607,66 +621,70 @@ mod tests {
     #[test]
     fn test_prepare_token_flow_empty() {
         let data = prepare_token_flow_data(&[]);
-        assert_eq!(data.input_data.len(), 1);
-        assert_eq!(data.output_data.len(), 1);
+        assert_eq!(data.input_data.len(), 60);
+        assert_eq!(data.output_data.len(), 60);
         assert_eq!(data.max_value, 1.0);
     }
 
     #[test]
     fn test_prepare_token_flow_single_point() {
+        let now = chrono::Local::now();
+        let minute_key = now.format("%H:%M").to_string();
         let flow = vec![TokenFlowPoint {
-            minute: "12:00".to_string(),
+            minute: minute_key,
             input_tokens: 100,
             output_tokens: 50,
             total_tokens: 150,
         }];
         let data = prepare_token_flow_data(&flow);
-        assert_eq!(data.input_data.len(), 1);
-        assert_eq!(data.output_data.len(), 1);
-        assert_eq!(data.input_data[0], (0.0, 100.0));
-        assert_eq!(data.output_data[0], (0.0, 50.0));
+        assert_eq!(data.input_data.len(), 60);
+        assert_eq!(data.output_data.len(), 60);
+        // Last element should have the data (it's the current minute)
+        assert_eq!(data.input_data[59].1, 100.0);
+        assert_eq!(data.output_data[59].1, 50.0);
         assert_eq!(data.max_value, 100.0);
     }
 
     #[test]
     fn test_prepare_token_flow_multiple_points() {
+        let now = chrono::Local::now();
         let flow = vec![
             TokenFlowPoint {
-                minute: "12:00".to_string(),
+                minute: (now - chrono::Duration::minutes(2)).format("%H:%M").to_string(),
                 input_tokens: 100,
                 output_tokens: 200,
                 total_tokens: 300,
             },
             TokenFlowPoint {
-                minute: "12:01".to_string(),
+                minute: (now - chrono::Duration::minutes(1)).format("%H:%M").to_string(),
                 input_tokens: 300,
                 output_tokens: 100,
                 total_tokens: 400,
             },
             TokenFlowPoint {
-                minute: "12:02".to_string(),
+                minute: now.format("%H:%M").to_string(),
                 input_tokens: 50,
                 output_tokens: 400,
                 total_tokens: 450,
             },
         ];
         let data = prepare_token_flow_data(&flow);
-        assert_eq!(data.input_data.len(), 3);
-        assert_eq!(data.output_data.len(), 3);
-        // Max is output_tokens 400 from the 3rd point
+        assert_eq!(data.input_data.len(), 60);
+        assert_eq!(data.output_data.len(), 60);
         assert_eq!(data.max_value, 400.0);
-        // Verify x-axis indices
-        assert_eq!(data.input_data[1].0, 1.0);
-        assert_eq!(data.output_data[2].0, 2.0);
-        // Verify values
-        assert_eq!(data.input_data[0].1, 100.0);
-        assert_eq!(data.output_data[2].1, 400.0);
+        // Last 3 minutes should have data, rest zeros
+        assert_eq!(data.output_data[59].1, 400.0);
+        assert_eq!(data.input_data[58].1, 300.0);
+        assert_eq!(data.input_data[57].1, 100.0);
+        // A minute without data should be zero
+        assert_eq!(data.input_data[50].1, 0.0);
     }
 
     #[test]
     fn test_prepare_token_flow_max_never_zero() {
+        let now = chrono::Local::now();
         let flow = vec![TokenFlowPoint {
-            minute: "12:00".to_string(),
+            minute: now.format("%H:%M").to_string(),
             input_tokens: 0,
             output_tokens: 0,
             total_tokens: 0,
