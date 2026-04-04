@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
 use ratatui::Frame;
 
-use super::format::{braille_bar_spans, format_relative_time, format_tokens, lerp_color_3, shorten_model, truncate};
+use super::format::{braille_bar_spans, format_relative_time, format_tokens, shorten_model, truncate};
 use super::layout::{dashboard_layout, layout_tier, LayoutTier};
 use super::theme::Theme;
 use super::widgets::cost_color::cost_color;
@@ -204,13 +204,18 @@ fn render_metrics(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui:
     f.render_widget(Paragraph::new(right_lines), cols[1]);
 }
 
-fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::layout::Rect) {
+fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.muted))
         .title({
             let mut t = panel_title("Token Flow ", theme).spans;
-            t.push(Span::styled("(last hour)", Style::default().fg(theme.text_dim)));
+            t.extend([
+                Span::styled("(last hour) ", Style::default().fg(theme.text_dim)),
+                Span::styled("in", Style::default().fg(theme.secondary)),
+                Span::styled("/", Style::default().fg(theme.muted)),
+                Span::styled("out", Style::default().fg(theme.tertiary)),
+            ]);
             Line::from(t)
         });
 
@@ -230,18 +235,12 @@ fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: ratat
     let chart_data = prepare_token_flow_data(&state.token_flow);
 
     // Stacked area: input on bottom, output on top
-    // y_max is based on max(input + output) so both fit
     let stacked_max = state.token_flow.iter()
         .map(|p| (p.input_tokens + p.output_tokens) as f64)
         .fold(0.0f64, f64::max)
         .max(1.0);
     let y_max = stacked_max * 1.1;
 
-    // Render filled braille area chart (btop-style)
-    // Each braille character is a 2-col x 4-row dot grid
-    // Unicode braille: U+2800 base, dots are bits:
-    //   col0: row0=0x01, row1=0x02, row2=0x04, row3=0x40
-    //   col1: row0=0x08, row1=0x10, row2=0x20, row3=0x80
     let w = inner.width as usize;
     let h = inner.height as usize;
     if w == 0 || h == 0 {
@@ -251,7 +250,6 @@ fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: ratat
     let dot_cols = w * 2;
     let dot_rows = h * 4;
 
-    // Interpolate data to fill the dot grid width
     let n = chart_data.input_data.len();
     let interpolate = |data: &[(f64, f64)], x: usize| -> f64 {
         if n <= 1 {
@@ -263,54 +261,45 @@ fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: ratat
         data[i].1 * (1.0 - t) + data[i + 1].1 * t
     };
 
-    // Pre-compute per-column: total height and braille bits per cell row
-    // So we can color each cell by its vertical position within that column's data
-    let gradient_colors = [theme.bar_low, theme.bar_mid, theme.bar_high];
-
-    // For each char_col, find the max total_height across its 2 dot columns
-    let col_heights: Vec<usize> = (0..w).map(|char_col| {
-        let mut max_h = 0usize;
+    // Pre-compute stacked heights per character column: (input_h, total_h)
+    let mut col_info: Vec<(usize, usize)> = vec![(0, 0); w];
+    for (char_col, info) in col_info.iter_mut().enumerate() {
         for dc in 0..2 {
             let x = char_col * 2 + dc;
             if x >= dot_cols { continue; }
-            let input_val = interpolate(&chart_data.input_data, x);
-            let output_val = interpolate(&chart_data.output_data, x);
-            let ih = if y_max > 0.0 { (input_val / y_max * dot_rows as f64).round() as usize } else { 0 };
-            let oh = if y_max > 0.0 { (output_val / y_max * dot_rows as f64).round() as usize } else { 0 };
-            max_h = max_h.max(ih + oh);
+            let iv = interpolate(&chart_data.input_data, x);
+            let ov = interpolate(&chart_data.output_data, x);
+            let ih = (iv / y_max * dot_rows as f64).round() as usize;
+            let oh = (ov / y_max * dot_rows as f64).round() as usize;
+            info.0 = info.0.max(ih);
+            info.1 = info.1.max(ih + oh);
         }
-        max_h
-    }).collect();
+    }
+
+    let dot_bits: [[u16; 4]; 2] = [
+        [0x01, 0x02, 0x04, 0x40],
+        [0x08, 0x10, 0x20, 0x80],
+    ];
 
     let mut lines = Vec::with_capacity(h);
-
     for char_row in 0..h {
         let mut spans = Vec::new();
-        for (char_col, &col_h) in col_heights.iter().enumerate() {
+        for (char_col, &(input_h, total_h)) in col_info.iter().enumerate() {
             let mut braille: u16 = 0x2800;
-            let dot_bits: [[u16; 4]; 2] = [
-                [0x01, 0x02, 0x04, 0x40],
-                [0x08, 0x10, 0x20, 0x80],
-            ];
-
             let mut has_data = false;
 
             for (dc, col_bits) in dot_bits.iter().enumerate() {
                 let x = char_col * 2 + dc;
                 if x >= dot_cols { continue; }
 
-                let input_val = interpolate(&chart_data.input_data, x);
-                let output_val = interpolate(&chart_data.output_data, x);
-
-                let input_height = if y_max > 0.0 { (input_val / y_max * dot_rows as f64).round() as usize } else { 0 };
-                let output_height = if y_max > 0.0 { (output_val / y_max * dot_rows as f64).round() as usize } else { 0 };
-                let total_height = input_height + output_height;
+                let iv = interpolate(&chart_data.input_data, x);
+                let ov = interpolate(&chart_data.output_data, x);
+                let th = (iv / y_max * dot_rows as f64).round() as usize
+                    + (ov / y_max * dot_rows as f64).round() as usize;
 
                 for (dr, &bit) in col_bits.iter().enumerate() {
-                    let grid_row = char_row * 4 + dr;
-                    let from_bottom = dot_rows.saturating_sub(1).saturating_sub(grid_row);
-
-                    if from_bottom < total_height {
+                    let from_bottom = dot_rows.saturating_sub(1).saturating_sub(char_row * 4 + dr);
+                    if from_bottom < th {
                         braille |= bit;
                         has_data = true;
                     }
@@ -319,23 +308,41 @@ fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: ratat
 
             let ch = char::from_u32(braille as u32).unwrap_or(' ');
             let color = if has_data {
-                // Where is this cell row within the column's data? (0=bottom, 1=top of data)
+                let cell_center = dot_rows.saturating_sub(char_row * 4 + 2);
+                // Input region (bottom) = teal, output region (top) = gold
+                let (base_color, region_bot, region_h) = if cell_center < input_h {
+                    (theme.secondary, 0, input_h)
+                } else {
+                    (theme.tertiary, input_h, total_h.saturating_sub(input_h))
+                };
+                // Brightness gradient within region: dim at bottom, bright at top
                 let cell_bottom = dot_rows.saturating_sub((char_row + 1) * 4);
-                let t = if col_h > 0 { (cell_bottom as f64 / col_h as f64).clamp(0.0, 1.0) } else { 0.0 };
-                lerp_color_3(gradient_colors, t)
+                let pos = cell_bottom.saturating_sub(region_bot);
+                let t = if region_h > 0 { (pos as f64 / region_h as f64).clamp(0.0, 1.0) } else { 1.0 };
+                dim_color(base_color, 0.35 + t * 0.65)
             } else {
                 theme.bar_empty
             };
 
-            spans.push(Span::styled(
-                ch.to_string(),
-                Style::default().fg(color),
-            ));
+            spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
         }
         lines.push(Line::from(spans));
     }
 
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Scale a color's brightness: t=0 → black, t=1 → full color.
+fn dim_color(color: ratatui::style::Color, t: f64) -> ratatui::style::Color {
+    if let ratatui::style::Color::Rgb(r, g, b) = color {
+        ratatui::style::Color::Rgb(
+            (r as f64 * t).round() as u8,
+            (g as f64 * t).round() as u8,
+            (b as f64 * t).round() as u8,
+        )
+    } else {
+        color
+    }
 }
 
 fn render_model_breakdown(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::layout::Rect) {
