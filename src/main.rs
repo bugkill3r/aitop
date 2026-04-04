@@ -53,6 +53,10 @@ struct Args {
     /// Filter by project name
     #[arg(short, long)]
     project: Option<String>,
+
+    /// Timezone for date grouping: "local" (default), "utc", or offset like "+05:30", "-08:00"
+    #[arg(long, default_value = "local")]
+    tz: String,
 }
 
 fn main() -> Result<()> {
@@ -159,21 +163,24 @@ fn main() -> Result<()> {
         io::stderr().flush().ok();
     }
 
+    // CLI --tz overrides config timezone (both default to "local")
+    let tz = if args.tz != "local" { args.tz } else { config.timezone.clone() };
+
     if args.light {
         drop(db);
-        return print_light_mode(&db_path, pricing);
+        return print_light_mode(&db_path, pricing, &tz);
     }
 
     if args.tmux_status {
         drop(db);
-        return print_tmux_status(&db_path);
+        return print_tmux_status(&db_path, &tz);
     }
 
-    run_tui(config, db, &db_path, &projects_dir, pricing)
+    run_tui(config, db, &db_path, &projects_dir, pricing, &tz)
 }
 
-fn print_light_mode(db_path: &std::path::Path, pricing: PricingRegistry) -> Result<()> {
-    let agg = Aggregator::open_with_pricing(db_path, pricing)?;
+fn print_light_mode(db_path: &std::path::Path, pricing: PricingRegistry, tz: &str) -> Result<()> {
+    let agg = Aggregator::open_with_options(db_path, pricing, tz)?;
     let stats = agg.dashboard_stats()?;
     let models = agg.model_breakdown()?;
 
@@ -216,8 +223,8 @@ fn print_light_mode(db_path: &std::path::Path, pricing: PricingRegistry) -> Resu
     Ok(())
 }
 
-fn print_tmux_status(db_path: &std::path::Path) -> Result<()> {
-    let agg = Aggregator::open(db_path)?;
+fn print_tmux_status(db_path: &std::path::Path, tz: &str) -> Result<()> {
+    let agg = Aggregator::open_with_options(db_path, PricingRegistry::builtin(), tz)?;
     let stats = agg.dashboard_stats()?;
     print!(
         "{}",
@@ -232,6 +239,7 @@ fn run_tui(
     db_path: &std::path::Path,
     projects_dir: &std::path::Path,
     pricing: PricingRegistry,
+    tz: &str,
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -242,7 +250,7 @@ fn run_tui(
     let mut theme = ui::theme::get_theme(&config.theme);
     let mut state = AppState::new(config);
 
-    let agg = Aggregator::open_with_pricing(db_path, pricing)?;
+    let agg = Aggregator::open_with_options(db_path, pricing, tz)?;
     state.refresh_data(&agg);
 
     // Delta banner: load last_checked_at and compute deltas

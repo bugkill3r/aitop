@@ -139,27 +139,53 @@ pub struct ContributionDay {
 pub struct Aggregator {
     conn: Connection,
     pricing: PricingRegistry,
+    tz_modifier: String,
+}
+
+/// Convert a user-facing timezone string into a SQLite modifier.
+/// "local" → "localtime", "utc" → "utc", "+05:30" → "+05:30" (offset passed directly).
+fn tz_to_sqlite_modifier(tz: &str) -> String {
+    match tz.to_lowercase().as_str() {
+        "local" | "localtime" | "" => "localtime".to_string(),
+        "utc" => "utc".to_string(),
+        other => other.to_string(), // pass offset like "+05:30" directly
+    }
 }
 
 impl Aggregator {
     pub fn open(db_path: &Path) -> Result<Self> {
-        Self::open_with_pricing(db_path, PricingRegistry::builtin())
+        Self::open_with_options(db_path, PricingRegistry::builtin(), "local")
     }
 
     pub fn open_with_pricing(db_path: &Path, pricing: PricingRegistry) -> Result<Self> {
+        Self::open_with_options(db_path, pricing, "local")
+    }
+
+    pub fn open_with_options(db_path: &Path, pricing: PricingRegistry, tz: &str) -> Result<Self> {
         let conn = Connection::open_with_flags(
             db_path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        // Create a view that converts timestamps to local timezone once,
-        // so queries don't need 'localtime' scattered everywhere.
-        conn.execute_batch(
+        let tz_modifier = tz_to_sqlite_modifier(tz);
+        // Create a view that converts timestamps to the chosen timezone once,
+        // so queries don't need timezone modifiers scattered everywhere.
+        conn.execute_batch(&format!(
             "CREATE TEMP VIEW messages_local AS
-             SELECT *, datetime(timestamp, 'localtime') as ts,
-                       date(timestamp, 'localtime') as dt
-             FROM messages",
-        )?;
-        Ok(Aggregator { conn, pricing })
+             SELECT *, datetime(timestamp, '{tz_modifier}') as ts,
+                       date(timestamp, '{tz_modifier}') as dt
+             FROM messages"
+        ))?;
+        Ok(Aggregator { conn, pricing, tz_modifier })
+    }
+
+    /// Generate `date('now', '<tz>')` SQL fragment.
+    fn date_now(&self) -> String {
+        format!("date('now', '{}')", self.tz_modifier)
+    }
+
+    /// Generate `datetime('now', '<offset>', '<tz>')` SQL fragment.
+    fn datetime_ago(&self, offset: &str) -> String {
+        format!("datetime('now', '{}', '{}')", offset, self.tz_modifier)
     }
 
     pub fn dashboard_stats(&self) -> Result<DashboardStats> {
@@ -191,21 +217,21 @@ impl Aggregator {
 
         // Today's spend
         stats.spend_today = self.conn.query_row(
-            "SELECT COALESCE(SUM(cost_usd), 0) FROM messages_local WHERE dt = date('now', 'localtime')",
+            &format!("SELECT COALESCE(SUM(cost_usd), 0) FROM messages_local WHERE dt = {}", self.date_now()),
             [],
             |row| row.get(0),
         )?;
 
         // This week's spend (last 7 days)
         stats.spend_this_week = self.conn.query_row(
-            "SELECT COALESCE(SUM(cost_usd), 0) FROM messages_local WHERE ts > datetime('now', '-7 days', 'localtime')",
+            &format!("SELECT COALESCE(SUM(cost_usd), 0) FROM messages_local WHERE ts > {}", self.datetime_ago("-7 days")),
             [],
             |row| row.get(0),
         )?;
 
         // Burn rate: cost in last hour extrapolated to $/hr
         stats.burn_rate_per_hour = self.conn.query_row(
-            "SELECT COALESCE(SUM(cost_usd), 0) FROM messages_local WHERE ts > datetime('now', '-1 hour', 'localtime')",
+            &format!("SELECT COALESCE(SUM(cost_usd), 0) FROM messages_local WHERE ts > {}", self.datetime_ago("-1 hour")),
             [],
             |row| row.get(0),
         )?;
@@ -298,16 +324,16 @@ impl Aggregator {
 
     /// Daily total tokens for the token overlay chart.
     pub fn daily_tokens(&self, days: i32) -> Result<Vec<DailyTokenCount>> {
-        let mut stmt = self.conn.prepare(
+        let ago = format!("-{} days", days);
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT dt as day, SUM(input_tokens + output_tokens)
              FROM messages_local
-             WHERE ts > datetime('now', ?1, 'localtime')
+             WHERE ts > {}
              GROUP BY day
-             ORDER BY day",
-        )?;
+             ORDER BY day", self.datetime_ago(&ago)
+        ))?;
 
-        let range = format!("-{} days", days);
-        let rows = stmt.query_map(params![range], |row| {
+        let rows = stmt.query_map([], |row| {
             Ok(DailyTokenCount {
                 date: row.get(0)?,
                 total_tokens: row.get(1)?,
@@ -318,16 +344,16 @@ impl Aggregator {
     }
 
     pub fn daily_spend(&self, days: i32) -> Result<Vec<DailySpend>> {
-        let mut stmt = self.conn.prepare(
+        let ago = format!("-{} days", days);
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT dt as day, SUM(cost_usd)
              FROM messages_local
-             WHERE ts > datetime('now', ?1, 'localtime')
+             WHERE ts > {}
              GROUP BY day
-             ORDER BY day",
-        )?;
+             ORDER BY day", self.datetime_ago(&ago)
+        ))?;
 
-        let range = format!("-{} days", days);
-        let rows = stmt.query_map(params![range], |row| {
+        let rows = stmt.query_map([], |row| {
             Ok(DailySpend {
                 date: row.get(0)?,
                 cost: row.get(1)?,
@@ -338,15 +364,15 @@ impl Aggregator {
     }
 
     pub fn token_flow_last_hour(&self) -> Result<Vec<TokenFlowPoint>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT strftime('%H:%M', ts) as minute,
                     SUM(input_tokens), SUM(output_tokens),
                     SUM(input_tokens + output_tokens)
              FROM messages_local
-             WHERE ts > datetime('now', '-1 hour', 'localtime')
+             WHERE ts > {}
              GROUP BY minute
-             ORDER BY minute",
-        )?;
+             ORDER BY minute", self.datetime_ago("-1 hour")
+        ))?;
 
         let rows = stmt.query_map([], |row| {
             Ok(TokenFlowPoint {
@@ -541,20 +567,20 @@ impl Aggregator {
     pub fn efficiency_stats(&self) -> Result<EfficiencyStats> {
         // Current week
         let (this_week_tokens, this_week_cost): (i64, f64) = self.conn.query_row(
-            "SELECT COALESCE(SUM(input_tokens + output_tokens), 0),
+            &format!("SELECT COALESCE(SUM(input_tokens + output_tokens), 0),
                     COALESCE(SUM(cost_usd), 0)
              FROM messages_local
-             WHERE ts > datetime('now', '-7 days', 'localtime')",
+             WHERE ts > {}", self.datetime_ago("-7 days")),
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
 
         // Last week (7-14 days ago)
         let (last_week_tokens, last_week_cost): (i64, f64) = self.conn.query_row(
-            "SELECT COALESCE(SUM(input_tokens + output_tokens), 0),
+            &format!("SELECT COALESCE(SUM(input_tokens + output_tokens), 0),
                     COALESCE(SUM(cost_usd), 0)
              FROM messages_local
-             WHERE ts > datetime('now', '-14 days', 'localtime') AND ts <= datetime('now', '-7 days', 'localtime')",
+             WHERE ts > {} AND ts <= {}", self.datetime_ago("-14 days"), self.datetime_ago("-7 days")),
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
@@ -603,13 +629,13 @@ impl Aggregator {
 
     /// Contribution calendar: daily spend for last 84 days (12 weeks).
     pub fn contribution_calendar(&self) -> Result<Vec<ContributionDay>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT dt as day, SUM(cost_usd)
              FROM messages_local
-             WHERE ts > datetime('now', '-84 days', 'localtime')
+             WHERE ts > {}
              GROUP BY day
-             ORDER BY day",
-        )?;
+             ORDER BY day", self.datetime_ago("-84 days")
+        ))?;
 
         let rows = stmt.query_map([], |row| {
             Ok(ContributionDay {
@@ -650,13 +676,13 @@ impl Aggregator {
 
     /// Get daily costs per session for the last 7 days (for sparklines).
     pub fn session_daily_costs(&self) -> Result<std::collections::HashMap<String, Vec<f64>>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT m.session_id, m.dt as day, SUM(m.cost_usd)
              FROM messages_local m
-             WHERE m.ts > datetime('now', '-7 days', 'localtime')
+             WHERE m.ts > {}
              GROUP BY m.session_id, day
-             ORDER BY m.session_id, day",
-        )?;
+             ORDER BY m.session_id, day", self.datetime_ago("-7 days")
+        ))?;
 
         let mut result: std::collections::HashMap<String, Vec<(String, f64)>> =
             std::collections::HashMap::new();

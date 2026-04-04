@@ -23,6 +23,10 @@ pub struct Config {
 
     pub admin_api_key: Option<String>,
 
+    /// Timezone: "local" (default), "utc", or offset like "+05:30"
+    #[serde(default = "default_tz")]
+    pub timezone: String,
+
     #[serde(default)]
     pub model_pricing: HashMap<String, ModelPriceConfig>,
 }
@@ -35,6 +39,10 @@ fn default_theme() -> String {
     "catppuccin".to_string()
 }
 
+fn default_tz() -> String {
+    "local".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -44,6 +52,7 @@ impl Default for Config {
             budget: None,
             data_dir: None,
             admin_api_key: None,
+            timezone: default_tz(),
             model_pricing: HashMap::new(),
         }
     }
