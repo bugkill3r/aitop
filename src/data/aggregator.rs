@@ -119,7 +119,8 @@ pub struct EfficiencyStats {
     pub tokens_per_dollar: f64,
     pub tokens_per_dollar_last_week: f64,
     pub efficiency_change_pct: f64,
-    pub cache_savings_usd: f64,
+    pub cache_savings_today: f64,
+    pub cache_savings_alltime: f64,
 }
 
 /// Daily token count for the token overlay in trends.
@@ -602,28 +603,42 @@ impl Aggregator {
         };
 
         // Cache savings: compute per-model using the pricing registry
-        let mut cache_stmt = self.conn.prepare(
-            "SELECT COALESCE(model, 'unknown'), COALESCE(SUM(cache_read), 0)
-             FROM messages
-             WHERE model IS NOT NULL
-             GROUP BY model",
-        )?;
-        let cache_rows = cache_stmt
-            .query_map([], |row| {
+        let compute_cache_savings = |filter: &str| -> f64 {
+            let sql = format!(
+                "SELECT COALESCE(model, 'unknown'), COALESCE(SUM(cache_read), 0)
+                 FROM messages_local
+                 WHERE model IS NOT NULL {filter}
+                 GROUP BY model"
+            );
+            let mut stmt = match self.conn.prepare(&sql) {
+                Ok(s) => s,
+                Err(_) => return 0.0,
+            };
+            let rows = match stmt.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })?;
-        let mut cache_savings = 0.0;
-        for row in cache_rows.flatten() {
-            let (model, cache_read) = row;
-            let price = self.pricing.lookup(&model);
-            cache_savings += cache_read as f64 * (price.input - price.cache_read) / 1_000_000.0;
-        }
+            }) {
+                Ok(r) => r,
+                Err(_) => return 0.0,
+            };
+            let mut total = 0.0;
+            for row in rows.flatten() {
+                let (model, cache_read) = row;
+                let price = self.pricing.lookup(&model);
+                total += cache_read as f64 * (price.input - price.cache_read) / 1_000_000.0;
+            }
+            total
+        };
+
+        let today = self.date_now();
+        let cache_today = compute_cache_savings(&format!("AND dt = {today}"));
+        let cache_alltime = compute_cache_savings("");
 
         Ok(EfficiencyStats {
             tokens_per_dollar,
             tokens_per_dollar_last_week,
             efficiency_change_pct,
-            cache_savings_usd: cache_savings,
+            cache_savings_today: cache_today,
+            cache_savings_alltime: cache_alltime,
         })
     }
 

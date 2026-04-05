@@ -89,8 +89,8 @@ fn render_delta_banner(f: &mut Frame, state: &AppState, theme: &Theme, area: Rec
 
 fn render_metrics(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::layout::Rect) {
     let stats = &state.dashboard;
+    let eff = &state.efficiency;
 
-    let burn_arrow = if stats.burn_rate_per_hour > 0.0 { "\u{25B2}" } else { "\u{00B7}" };
     let burn_color = if stats.burn_rate_per_hour > 10.0 {
         theme.danger
     } else if stats.burn_rate_per_hour > 5.0 {
@@ -107,33 +107,94 @@ fn render_metrics(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui:
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    // 3-column layout: hero burn rate | spend breakdown | efficiency
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Length(13),     // burn rate hero
+            Constraint::Percentage(40), // spend grid
+            Constraint::Percentage(50), // efficiency (wider — cache values can be long)
+        ])
         .split(inner);
 
-    // Left: burn rate + efficiency
-    let eff = &state.efficiency;
-    let eff_arrow = if eff.efficiency_change_pct > 0.0 { "\u{2191}" } else if eff.efficiency_change_pct < 0.0 { "\u{2193}" } else { "" };
-    let eff_color = if eff.efficiency_change_pct >= 0.0 { theme.success } else { theme.danger };
-
-    let burn_text = vec![
+    // Column 1: Hero burn rate
+    let burn_arrow = if stats.burn_rate_per_hour > 0.0 { " \u{25B2}" } else { "" };
+    let hero = vec![
+        Line::from(""),
         Line::from(vec![
             Span::styled(
-                format!("${:.2}/hr {}", stats.burn_rate_per_hour, burn_arrow),
+                format!(" ${:.2}", stats.burn_rate_per_hour),
                 Style::default().fg(burn_color).add_modifier(Modifier::BOLD),
             ),
+            Span::styled(burn_arrow, Style::default().fg(burn_color)),
         ]),
         Line::from(vec![
-            Span::styled("Today ", Style::default().fg(theme.text_dim)),
+            Span::styled(" per hour", Style::default().fg(theme.text_dim)),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(hero), cols[0]);
+
+    // Column 2: Spend breakdown (vertically centered)
+    let mut spend_lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Today ", Style::default().fg(theme.text_dim)),
             Span::styled(
                 format!("${:.2}", stats.spend_today),
                 Style::default().fg(theme.tertiary).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
+            Span::styled(" Week  ", Style::default().fg(theme.text_dim)),
             Span::styled(
-                format!("{:.0}tok/$", eff.tokens_per_dollar),
+                format!("${:.2}", stats.spend_this_week),
+                Style::default().fg(theme.text),
+            ),
+        ]),
+    ];
+
+    if let Some(budget) = state.config.weekly_budget {
+        let pct = (stats.spend_this_week / budget).min(1.0);
+        let gauge_color = if pct < 0.60 {
+            theme.success
+        } else if pct < 0.85 {
+            theme.tertiary
+        } else {
+            theme.danger
+        };
+        let bar_total = 10usize;
+        let filled = ((pct * bar_total as f64) as usize).min(bar_total);
+        let empty = bar_total - filled;
+        spend_lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("\u{2588}".repeat(filled), Style::default().fg(gauge_color)),
+            Span::styled("\u{2591}".repeat(empty), Style::default().fg(theme.bar_empty)),
+            Span::styled(
+                format!(" {:.0}%", pct * 100.0),
+                Style::default().fg(gauge_color),
+            ),
+        ]));
+    } else {
+        spend_lines.push(Line::from(vec![
+            Span::styled(" Total ", Style::default().fg(theme.text_dim)),
+            Span::styled(
+                format!("${:.2}", stats.spend_all_time),
+                Style::default().fg(theme.text),
+            ),
+        ]));
+    }
+
+    f.render_widget(Paragraph::new(spend_lines), cols[1]);
+
+    // Column 3: Efficiency stats
+    let eff_arrow = if eff.efficiency_change_pct > 0.0 { "\u{2191}" } else if eff.efficiency_change_pct < 0.0 { "\u{2193}" } else { "" };
+    let eff_color = if eff.efficiency_change_pct >= 0.0 { theme.success } else { theme.danger };
+
+    let eff_lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                format!(" {:.0} tok/$", eff.tokens_per_dollar),
                 Style::default().fg(theme.secondary),
             ),
             Span::styled(
@@ -146,62 +207,23 @@ fn render_metrics(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui:
             ),
         ]),
         Line::from(vec![
+            Span::styled(" Cache ", Style::default().fg(theme.text_dim)),
             Span::styled(
-                format!("Cache saved ${:.2}", eff.cache_savings_usd),
+                format!("${:.2}", eff.cache_savings_today),
+                Style::default().fg(theme.success),
+            ),
+            Span::styled(" today", Style::default().fg(theme.text_dim)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Cache ", Style::default().fg(theme.text_dim)),
+            Span::styled(
+                format!("${:.2}", eff.cache_savings_alltime),
                 Style::default().fg(theme.text_dim),
             ),
+            Span::styled(" total", Style::default().fg(theme.text_dim)),
         ]),
     ];
-    f.render_widget(Paragraph::new(burn_text), cols[0]);
-
-    // Right: week spend + budget gauge
-    let mut right_lines = vec![
-        Line::from(vec![
-            Span::styled("This Week ", Style::default().fg(theme.text_dim)),
-            Span::styled(
-                format!("${:.2}", stats.spend_this_week),
-                Style::default().fg(theme.tertiary).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(""),
-    ];
-
-    if let Some(budget) = state.config.weekly_budget {
-        let pct = (stats.spend_this_week / budget).min(1.0);
-        let pct_int = (pct * 100.0) as u16;
-        let gauge_color = if pct < 0.60 {
-            theme.success
-        } else if pct < 0.85 {
-            theme.tertiary
-        } else {
-            theme.danger
-        };
-
-        let bar_total = 12usize;
-        let filled = ((pct * bar_total as f64) as usize).min(bar_total);
-        let empty = bar_total - filled;
-        let bar_filled: String = "\u{2588}".repeat(filled);
-        let bar_empty: String = "\u{2591}".repeat(empty);
-
-        right_lines.push(Line::from(vec![
-            Span::styled("Budget ", Style::default().fg(theme.text_dim)),
-            Span::styled(bar_filled, Style::default().fg(gauge_color)),
-            Span::styled(bar_empty, Style::default().fg(theme.bar_empty)),
-            Span::styled(
-                format!(" {}% (${:.0} / ${:.0})", pct_int, stats.spend_this_week, budget),
-                Style::default().fg(gauge_color),
-            ),
-        ]));
-    } else {
-        right_lines.push(Line::from(vec![
-            Span::styled("All-time ", Style::default().fg(theme.text_dim)),
-            Span::styled(
-                format!("${:.2}", stats.spend_all_time),
-                Style::default().fg(theme.text)),
-        ]));
-    }
-
-    f.render_widget(Paragraph::new(right_lines), cols[1]);
+    f.render_widget(Paragraph::new(eff_lines), cols[2]);
 }
 
 fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: Rect) {
@@ -261,9 +283,13 @@ fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: Rect)
         data[i].1 * (1.0 - t) + data[i + 1].1 * t
     };
 
-    // Pre-compute stacked heights per character column: (input_h, total_h)
-    let mut col_info: Vec<(usize, usize)> = vec![(0, 0); w];
+    // Pre-compute stacked heights per character column: (input_share, total_h)
+    // input_share is the fraction of total that is input (0.0–1.0)
+    let mut col_info: Vec<(f64, usize)> = vec![(0.0, 0); w];
     for (char_col, info) in col_info.iter_mut().enumerate() {
+        let mut max_total = 0usize;
+        let mut sum_iv = 0.0f64;
+        let mut sum_total = 0.0f64;
         for dc in 0..2 {
             let x = char_col * 2 + dc;
             if x >= dot_cols { continue; }
@@ -271,9 +297,12 @@ fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: Rect)
             let ov = interpolate(&chart_data.output_data, x);
             let ih = (iv / y_max * dot_rows as f64).round() as usize;
             let oh = (ov / y_max * dot_rows as f64).round() as usize;
-            info.0 = info.0.max(ih);
-            info.1 = info.1.max(ih + oh);
+            max_total = max_total.max(ih + oh);
+            sum_iv += iv;
+            sum_total += iv + ov;
         }
+        info.0 = if sum_total > 0.0 { sum_iv / sum_total } else { 0.0 };
+        info.1 = max_total;
     }
 
     let dot_bits: [[u16; 4]; 2] = [
@@ -284,7 +313,7 @@ fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: Rect)
     let mut lines = Vec::with_capacity(h);
     for char_row in 0..h {
         let mut spans = Vec::new();
-        for (char_col, &(input_h, total_h)) in col_info.iter().enumerate() {
+        for (char_col, &(input_share, total_h)) in col_info.iter().enumerate() {
             let mut braille: u16 = 0x2800;
             let mut has_data = false;
 
@@ -308,15 +337,16 @@ fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: Rect)
 
             let ch = char::from_u32(braille as u32).unwrap_or(' ');
             let color = if has_data {
-                let cell_center = dot_rows.saturating_sub(char_row * 4 + 2);
-                // Input region (bottom) = teal, output region (top) = gold
-                let (base_color, region_bot, region_h) = if cell_center < input_h {
-                    (theme.secondary, 0, input_h)
+                // Color boundary based on actual input share of total
+                let cell_bottom = dot_rows.saturating_sub((char_row + 1) * 4);
+                let input_boundary = (input_share * total_h as f64).round() as usize;
+                let cell_center = cell_bottom + 2;
+                let (base_color, region_bot, region_h) = if cell_center < input_boundary {
+                    (theme.secondary, 0, input_boundary)
                 } else {
-                    (theme.tertiary, input_h, total_h.saturating_sub(input_h))
+                    (theme.tertiary, input_boundary, total_h.saturating_sub(input_boundary))
                 };
                 // Brightness gradient within region: dim at bottom, bright at top
-                let cell_bottom = dot_rows.saturating_sub((char_row + 1) * 4);
                 let pos = cell_bottom.saturating_sub(region_bot);
                 let t = if region_h > 0 { (pos as f64 / region_h as f64).clamp(0.0, 1.0) } else { 1.0 };
                 dim_color(base_color, 0.35 + t * 0.65)

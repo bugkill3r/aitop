@@ -111,12 +111,12 @@ pub fn dashboard_layout(area: Rect, tier: LayoutTier) -> DashboardAreas {
 
             let top = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+                .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
                 .split(vert[0]);
 
             let mid = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+                .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
                 .split(vert[1]);
 
             DashboardAreas {
@@ -141,7 +141,7 @@ pub fn dashboard_layout(area: Rect, tier: LayoutTier) -> DashboardAreas {
 
             let top = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(vert[0]);
 
             DashboardAreas {
