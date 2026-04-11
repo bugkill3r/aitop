@@ -226,6 +226,141 @@ fn render_metrics(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui:
     f.render_widget(Paragraph::new(eff_lines), cols[2]);
 }
 
+/// One rendered char cell of the token flow chart.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TokenFlowCell {
+    pub ch: char,
+    pub kind: TokenFlowCellKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TokenFlowCellKind {
+    Empty,
+    Input,  // teal/secondary
+    Output, // gold/tertiary
+}
+
+/// Pure rendering core for the token flow chart — returns a grid of cells with
+/// color kind. Extracted from `render_token_flow` so it's unit-testable without
+/// a Frame.
+pub fn compute_token_flow_cells(
+    flow: &[crate::data::aggregator::TokenFlowPoint],
+    w: usize,
+    h: usize,
+) -> Vec<Vec<TokenFlowCell>> {
+    if flow.is_empty() || w == 0 || h == 0 {
+        return vec![vec![TokenFlowCell { ch: ' ', kind: TokenFlowCellKind::Empty }; w]; h];
+    }
+
+    let chart_data = prepare_token_flow_data(flow);
+
+    let stacked_max = flow.iter()
+        .map(|p| (p.input_tokens + p.output_tokens) as f64)
+        .fold(0.0f64, f64::max)
+        .max(1.0);
+    let y_max = stacked_max * 1.1;
+
+    let dot_cols = w * 2;
+    let dot_rows = h * 4;
+
+    let n = chart_data.input_data.len();
+    let interpolate = |data: &[(f64, f64)], x: usize| -> f64 {
+        if n <= 1 {
+            return data.first().map(|d| d.1).unwrap_or(0.0);
+        }
+        let fx = x as f64 * (n - 1) as f64 / (dot_cols - 1).max(1) as f64;
+        let i = (fx as usize).min(n - 2);
+        let t = fx - i as f64;
+        data[i].1 * (1.0 - t) + data[i + 1].1 * t
+    };
+
+    // Pre-compute (input_share, total_h) per character column.
+    let mut col_info: Vec<(f64, usize)> = vec![(0.0, 0); w];
+    for (char_col, info) in col_info.iter_mut().enumerate() {
+        let mut max_total = 0usize;
+        let mut sum_iv = 0.0f64;
+        let mut sum_total = 0.0f64;
+        for dc in 0..2 {
+            let x = char_col * 2 + dc;
+            if x >= dot_cols { continue; }
+            let iv = interpolate(&chart_data.input_data, x);
+            let ov = interpolate(&chart_data.output_data, x);
+            let ih = (iv / y_max * dot_rows as f64).round() as usize;
+            let oh = (ov / y_max * dot_rows as f64).round() as usize;
+            max_total = max_total.max(ih + oh);
+            sum_iv += iv;
+            sum_total += iv + ov;
+        }
+        info.0 = if sum_total > 0.0 { sum_iv / sum_total } else { 0.0 };
+        info.1 = max_total;
+    }
+
+    let dot_bits: [[u16; 4]; 2] = [
+        [0x01, 0x02, 0x04, 0x40],
+        [0x08, 0x10, 0x20, 0x80],
+    ];
+
+    let mut grid = Vec::with_capacity(h);
+    for char_row in 0..h {
+        let mut row = Vec::with_capacity(w);
+        for (char_col, &(input_share, total_h)) in col_info.iter().enumerate() {
+            let mut braille: u16 = 0x2800;
+            let mut has_data = false;
+
+            for (dc, col_bits) in dot_bits.iter().enumerate() {
+                let x = char_col * 2 + dc;
+                if x >= dot_cols { continue; }
+
+                let iv = interpolate(&chart_data.input_data, x);
+                let ov = interpolate(&chart_data.output_data, x);
+                let th = (iv / y_max * dot_rows as f64).round() as usize
+                    + (ov / y_max * dot_rows as f64).round() as usize;
+
+                for (dr, &bit) in col_bits.iter().enumerate() {
+                    let from_bottom = dot_rows.saturating_sub(1).saturating_sub(char_row * 4 + dr);
+                    if from_bottom < th {
+                        braille |= bit;
+                        has_data = true;
+                    }
+                }
+            }
+
+            let ch = char::from_u32(braille as u32).unwrap_or(' ');
+            let kind = if has_data {
+                // Decide color by char-row granularity (not dot granularity) so
+                // each braille char gets one clean color. The number of filled
+                // char rows for this column is ceil(total_h / 4). We want the
+                // bottom N of those rows to be input, where N ≈ input_share *
+                // filled_rows, with a floor of 1 whenever any input exists so
+                // tiny but nonzero input stays visible against a big output.
+                let filled_rows = total_h.div_ceil(4);
+                let input_rows = if input_share > 0.0 && filled_rows > 0 {
+                    ((input_share * filled_rows as f64).round() as usize)
+                        .max(1)
+                        .min(filled_rows)
+                } else {
+                    0
+                };
+                let row_from_bottom = (h - 1).saturating_sub(char_row);
+                // Only the bottom `filled_rows` char rows actually carry data.
+                let is_in_filled = row_from_bottom < filled_rows;
+                if is_in_filled && row_from_bottom < input_rows {
+                    TokenFlowCellKind::Input
+                } else {
+                    TokenFlowCellKind::Output
+                }
+            } else {
+                TokenFlowCellKind::Empty
+            };
+
+            row.push(TokenFlowCell { ch, kind });
+        }
+        grid.push(row);
+    }
+
+    grid
+}
+
 fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -254,107 +389,34 @@ fn render_token_flow(f: &mut Frame, state: &AppState, theme: &Theme, area: Rect)
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let chart_data = prepare_token_flow_data(&state.token_flow);
-
-    // Stacked area: input on bottom, output on top
-    let stacked_max = state.token_flow.iter()
-        .map(|p| (p.input_tokens + p.output_tokens) as f64)
-        .fold(0.0f64, f64::max)
-        .max(1.0);
-    let y_max = stacked_max * 1.1;
-
     let w = inner.width as usize;
     let h = inner.height as usize;
     if w == 0 || h == 0 {
         return;
     }
 
-    let dot_cols = w * 2;
+    let grid = compute_token_flow_cells(&state.token_flow, w, h);
     let dot_rows = h * 4;
 
-    let n = chart_data.input_data.len();
-    let interpolate = |data: &[(f64, f64)], x: usize| -> f64 {
-        if n <= 1 {
-            return data.first().map(|d| d.1).unwrap_or(0.0);
-        }
-        let fx = x as f64 * (n - 1) as f64 / (dot_cols - 1).max(1) as f64;
-        let i = (fx as usize).min(n - 2);
-        let t = fx - i as f64;
-        data[i].1 * (1.0 - t) + data[i + 1].1 * t
-    };
-
-    // Pre-compute stacked heights per character column: (input_share, total_h)
-    // input_share is the fraction of total that is input (0.0–1.0)
-    let mut col_info: Vec<(f64, usize)> = vec![(0.0, 0); w];
-    for (char_col, info) in col_info.iter_mut().enumerate() {
-        let mut max_total = 0usize;
-        let mut sum_iv = 0.0f64;
-        let mut sum_total = 0.0f64;
-        for dc in 0..2 {
-            let x = char_col * 2 + dc;
-            if x >= dot_cols { continue; }
-            let iv = interpolate(&chart_data.input_data, x);
-            let ov = interpolate(&chart_data.output_data, x);
-            let ih = (iv / y_max * dot_rows as f64).round() as usize;
-            let oh = (ov / y_max * dot_rows as f64).round() as usize;
-            max_total = max_total.max(ih + oh);
-            sum_iv += iv;
-            sum_total += iv + ov;
-        }
-        info.0 = if sum_total > 0.0 { sum_iv / sum_total } else { 0.0 };
-        info.1 = max_total;
-    }
-
-    let dot_bits: [[u16; 4]; 2] = [
-        [0x01, 0x02, 0x04, 0x40],
-        [0x08, 0x10, 0x20, 0x80],
-    ];
-
     let mut lines = Vec::with_capacity(h);
-    for char_row in 0..h {
-        let mut spans = Vec::new();
-        for (char_col, &(input_share, total_h)) in col_info.iter().enumerate() {
-            let mut braille: u16 = 0x2800;
-            let mut has_data = false;
-
-            for (dc, col_bits) in dot_bits.iter().enumerate() {
-                let x = char_col * 2 + dc;
-                if x >= dot_cols { continue; }
-
-                let iv = interpolate(&chart_data.input_data, x);
-                let ov = interpolate(&chart_data.output_data, x);
-                let th = (iv / y_max * dot_rows as f64).round() as usize
-                    + (ov / y_max * dot_rows as f64).round() as usize;
-
-                for (dr, &bit) in col_bits.iter().enumerate() {
-                    let from_bottom = dot_rows.saturating_sub(1).saturating_sub(char_row * 4 + dr);
-                    if from_bottom < th {
-                        braille |= bit;
-                        has_data = true;
-                    }
+    for (char_row, row) in grid.iter().enumerate() {
+        let mut spans = Vec::with_capacity(w);
+        for cell in row {
+            let color = match cell.kind {
+                TokenFlowCellKind::Empty => theme.bar_empty,
+                TokenFlowCellKind::Input | TokenFlowCellKind::Output => {
+                    let base = if cell.kind == TokenFlowCellKind::Input {
+                        theme.secondary
+                    } else {
+                        theme.tertiary
+                    };
+                    // Brightness gradient: dimmer at bottom, brighter toward top of chart.
+                    let cell_bottom = dot_rows.saturating_sub((char_row + 1) * 4);
+                    let t = (cell_bottom as f64 / dot_rows.max(1) as f64).clamp(0.0, 1.0);
+                    dim_color(base, 0.45 + t * 0.55)
                 }
-            }
-
-            let ch = char::from_u32(braille as u32).unwrap_or(' ');
-            let color = if has_data {
-                // Color boundary based on actual input share of total
-                let cell_bottom = dot_rows.saturating_sub((char_row + 1) * 4);
-                let input_boundary = (input_share * total_h as f64).round() as usize;
-                let cell_center = cell_bottom + 2;
-                let (base_color, region_bot, region_h) = if cell_center < input_boundary {
-                    (theme.secondary, 0, input_boundary)
-                } else {
-                    (theme.tertiary, input_boundary, total_h.saturating_sub(input_boundary))
-                };
-                // Brightness gradient within region: dim at bottom, bright at top
-                let pos = cell_bottom.saturating_sub(region_bot);
-                let t = if region_h > 0 { (pos as f64 / region_h as f64).clamp(0.0, 1.0) } else { 1.0 };
-                dim_color(base_color, 0.35 + t * 0.65)
-            } else {
-                theme.bar_empty
             };
-
-            spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
+            spans.push(Span::styled(cell.ch.to_string(), Style::default().fg(color)));
         }
         lines.push(Line::from(spans));
     }
@@ -726,5 +788,97 @@ mod tests {
         }];
         let data = prepare_token_flow_data(&flow);
         assert!(data.max_value >= 1.0, "max_value should be at least 1.0 to avoid division by zero");
+    }
+
+    /// Helper: count the cells of each kind in a rendered grid.
+    fn count_kinds(grid: &[Vec<TokenFlowCell>]) -> (usize, usize, usize) {
+        let mut input = 0;
+        let mut output = 0;
+        let mut empty = 0;
+        for row in grid {
+            for cell in row {
+                match cell.kind {
+                    TokenFlowCellKind::Input => input += 1,
+                    TokenFlowCellKind::Output => output += 1,
+                    TokenFlowCellKind::Empty => empty += 1,
+                }
+            }
+        }
+        (input, output, empty)
+    }
+
+    /// When input dominates (like a fresh context window), most of the stack
+    /// should render as input color.
+    #[test]
+    fn test_token_flow_input_dominant() {
+        let now = chrono::Local::now();
+        let flow = vec![TokenFlowPoint {
+            minute: now.format("%H:%M").to_string(),
+            input_tokens: 50_000,
+            output_tokens: 2_000,
+            total_tokens: 52_000,
+        }];
+        let grid = compute_token_flow_cells(&flow, 80, 5);
+        let (input, output, _empty) = count_kinds(&grid);
+        assert!(input > 0, "expected input cells for 96% input ratio");
+        assert!(input >= output, "input should dominate: got in={input} out={output}");
+    }
+
+    /// When output dominates (steady chat response), most of the stack should
+    /// render as output color — but any nonzero input still shows at least one
+    /// row so the user sees the split.
+    #[test]
+    fn test_token_flow_output_dominant() {
+        let now = chrono::Local::now();
+        let flow = vec![TokenFlowPoint {
+            minute: now.format("%H:%M").to_string(),
+            input_tokens: 6,
+            output_tokens: 1366,
+            total_tokens: 1372,
+        }];
+        let grid = compute_token_flow_cells(&flow, 80, 5);
+        let (input, output, _empty) = count_kinds(&grid);
+        assert!(output > 0, "expected output cells");
+        assert!(output > input, "output should dominate: got in={input} out={output}");
+        // Even tiny input should be visible thanks to the min-share floor.
+        assert!(input > 0, "tiny input should still show at least 1 cell");
+    }
+
+    /// Mixed data across minutes: both colors should appear somewhere.
+    #[test]
+    fn test_token_flow_mixed_both_colors_visible() {
+        let now = chrono::Local::now();
+        let flow = vec![
+            // Minute A: heavy input (context reset)
+            TokenFlowPoint {
+                minute: (now - chrono::Duration::minutes(5)).format("%H:%M").to_string(),
+                input_tokens: 30_000,
+                output_tokens: 500,
+                total_tokens: 30_500,
+            },
+            // Minute B: heavy output (response)
+            TokenFlowPoint {
+                minute: now.format("%H:%M").to_string(),
+                input_tokens: 10,
+                output_tokens: 25_000,
+                total_tokens: 25_010,
+            },
+        ];
+        let grid = compute_token_flow_cells(&flow, 80, 5);
+        let (input, output, _empty) = count_kinds(&grid);
+        assert!(input > 0, "expected input cells somewhere in mixed data");
+        assert!(output > 0, "expected output cells somewhere in mixed data");
+    }
+
+    /// Empty flow should produce an all-empty grid of the requested size.
+    #[test]
+    fn test_token_flow_empty() {
+        let grid = compute_token_flow_cells(&[], 80, 5);
+        assert_eq!(grid.len(), 5);
+        assert_eq!(grid[0].len(), 80);
+        let (input, output, empty) = count_kinds(&grid);
+        assert_eq!(input, 0);
+        assert_eq!(output, 0);
+        assert_eq!(empty, 80 * 5);
     }
 }
