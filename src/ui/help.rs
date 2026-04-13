@@ -30,10 +30,14 @@ pub fn render_help(f: &mut Frame, theme: &Theme) {
         shortcut_line("r", "Force refresh", theme),
         shortcut_line("p", "Cycle theme", theme),
         shortcut_line("/", "Search / filter", theme),
-        shortcut_line("+/-", "Adjust refresh rate", theme),
+        shortcut_line("\\", "Toggle split pane", theme),
         shortcut_line("?", "Toggle this help", theme),
         shortcut_line("Esc", "Close overlay / clear", theme),
         shortcut_line("q", "Quit", theme),
+        Line::from(""),
+        // -- Split Pane --
+        Line::from(Span::styled("Split Pane", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))),
+        shortcut_line("D/S/M/T", "Set right pane view", theme),
         Line::from(""),
         // -- Sessions View --
         Line::from(Span::styled("Sessions View", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))),
@@ -43,6 +47,14 @@ pub fn render_help(f: &mut Frame, theme: &Theme) {
         shortcut_line("n", "Sort by tokens", theme),
         shortcut_line("p", "Sort by project", theme),
         shortcut_line("u", "Sort by updated", theme),
+        shortcut_line("y", "Copy session to clipboard", theme),
+        shortcut_line("Y", "Copy all as TSV", theme),
+        Line::from(""),
+        // -- Detail / Replay --
+        Line::from(Span::styled("Detail / Replay", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))),
+        shortcut_line("R", "Start replay", theme),
+        shortcut_line("Space", "Pause / resume replay", theme),
+        shortcut_line("+/-", "Replay speed", theme),
         Line::from(""),
         // -- Trends View --
         Line::from(Span::styled("Trends View", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))),
@@ -50,6 +62,8 @@ pub fn render_help(f: &mut Frame, theme: &Theme) {
         shortcut_line("o", "Last month", theme),
         shortcut_line("a", "All time", theme),
         shortcut_line("←/→", "Cycle time range", theme),
+        shortcut_line("n", "Toggle token overlay", theme),
+        shortcut_line("b", "Bar / line chart", theme),
     ];
 
     let para = Paragraph::new(help_text).block(

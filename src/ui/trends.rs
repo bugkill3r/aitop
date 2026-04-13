@@ -605,7 +605,7 @@ fn render_stats(f: &mut Frame, state: &AppState, theme: &Theme, area: ratatui::l
             vec![Line::from(Span::styled("  No data", Style::default().fg(theme.text_dim)))]
         }
     } else {
-        let max_day = state.daily_spend.iter().max_by(|a, b| a.cost.partial_cmp(&b.cost).unwrap());
+        let max_day = state.daily_spend.iter().max_by(|a, b| a.cost.partial_cmp(&b.cost).unwrap_or(std::cmp::Ordering::Equal));
         if let Some(peak) = max_day {
             vec![
                 Line::from(vec![

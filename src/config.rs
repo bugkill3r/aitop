@@ -21,8 +21,6 @@ pub struct Config {
     #[serde(alias = "claude_data_dir")]
     pub data_dir: Option<String>,
 
-    pub admin_api_key: Option<String>,
-
     /// Timezone: "local" (default), "utc", or offset like "+05:30"
     #[serde(default = "default_tz")]
     pub timezone: String,
@@ -51,7 +49,6 @@ impl Default for Config {
             weekly_budget: None,
             budget: None,
             data_dir: None,
-            admin_api_key: None,
             timezone: default_tz(),
             model_pricing: HashMap::new(),
         }

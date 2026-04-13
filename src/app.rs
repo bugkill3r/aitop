@@ -313,9 +313,9 @@ impl AppState {
         match self.session_sort {
             SessionSort::Cost => self.sessions.sort_by(|a, b| {
                 if self.sort_ascending {
-                    a.total_cost.partial_cmp(&b.total_cost).unwrap()
+                    a.total_cost.partial_cmp(&b.total_cost).unwrap_or(std::cmp::Ordering::Equal)
                 } else {
-                    b.total_cost.partial_cmp(&a.total_cost).unwrap()
+                    b.total_cost.partial_cmp(&a.total_cost).unwrap_or(std::cmp::Ordering::Equal)
                 }
             }),
             SessionSort::Tokens => self.sessions.sort_by(|a, b| {

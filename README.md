@@ -132,9 +132,16 @@ aitop --refresh 5
 | `Enter` | Open session detail popup |
 | `Esc` | Close popup / dismiss banner |
 | `/` | Filter sessions by project |
-| `c`/`n`/`o`/`u` | Sort by cost/tokens/project/recent |
-| `a` | Toggle sort ascending/descending |
-| `w`/`W`/`A` | Trend range: week/month/all |
+| `c`/`n`/`p`/`u` | Sort by cost/tokens/project/recent |
+| `y` / `Y` | Copy session / copy all as TSV |
+| `\\` | Toggle split pane |
+| `D`/`S`/`M`/`T` | Set right pane view (in split mode) |
+| `R` | Start session replay |
+| `Space` | Pause / resume replay |
+| `+`/`-` | Replay speed |
+| `w`/`o`/`a` | Trend range: week/month/all |
+| `n` | Toggle token overlay (trends) |
+| `b` | Bar / line chart (trends) |
 | `p` | Cycle color theme |
 | `r` | Force refresh |
 | `?` | Help overlay |

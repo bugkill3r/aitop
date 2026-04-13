@@ -1,8 +1,26 @@
 use std::fs;
+use std::io::Write;
 
 use aitop::data::aggregator::Aggregator;
 use aitop::data::db::Database;
 use aitop::data::scanner::scan_projects;
+
+/// Helper: create a temp dir, ingest sample data, return (db_path, tempdir).
+fn setup_fixture(jsonl: &str) -> (std::path::PathBuf, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let projects_dir = dir.path().join("projects");
+    let project_dir = projects_dir.join("-Users-test-myproject");
+    fs::create_dir_all(&project_dir).unwrap();
+    fs::write(project_dir.join("sess1.jsonl"), jsonl).unwrap();
+
+    let db_path = dir.path().join("test.db");
+    let db = Database::open(&db_path).unwrap();
+    for f in &scan_projects(&projects_dir).unwrap() {
+        db.ingest_file(f).unwrap();
+    }
+    drop(db);
+    (db_path, dir)
+}
 
 #[test]
 fn test_scan_ingest_aggregate() {
@@ -148,4 +166,111 @@ fn test_incremental_ingest() {
     assert_eq!(stats.total_sessions, 1);
     assert_eq!(stats.total_messages, 2); // Now 2 messages
     assert!(stats.spend_all_time > 0.0);
+}
+
+#[test]
+fn test_efficiency_stats() {
+    let jsonl = concat!(
+        r#"{"uuid":"u1","sessionId":"s1","type":"user","timestamp":"2025-01-15T10:00:00Z","parentUuid":null,"message":{"role":"user"}}"#,
+        "\n",
+        r#"{"uuid":"u2","sessionId":"s1","type":"assistant","timestamp":"2025-01-15T10:00:01Z","message":{"model":"claude-sonnet-4-6-20250514","role":"assistant","usage":{"input_tokens":10000,"output_tokens":2000,"cache_read_input_tokens":5000,"cache_creation_input_tokens":0}}}"#,
+    );
+    let (db_path, _dir) = setup_fixture(jsonl);
+    let agg = Aggregator::open(&db_path).unwrap();
+
+    let eff = agg.efficiency_stats().unwrap();
+    // Data is from 2025-01-15, outside the "last 7 days" window, so
+    // tokens_per_dollar (which uses the current week) will be 0.
+    // Just verify it doesn't panic and returns sensible values.
+    assert!(eff.tokens_per_dollar >= 0.0, "tokens_per_dollar should be non-negative");
+    assert!(eff.cache_savings_alltime >= 0.0, "cache savings should be >= 0");
+}
+
+#[test]
+fn test_dashboard_stats_token_totals() {
+    let jsonl = concat!(
+        r#"{"uuid":"u1","sessionId":"s1","type":"user","timestamp":"2025-01-15T10:00:00Z","parentUuid":null,"message":{"role":"user"}}"#,
+        "\n",
+        r#"{"uuid":"u2","sessionId":"s1","type":"assistant","timestamp":"2025-01-15T10:00:01Z","message":{"model":"claude-sonnet-4-6-20250514","role":"assistant","usage":{"input_tokens":1000,"output_tokens":500,"cache_read_input_tokens":200,"cache_creation_input_tokens":100}}}"#,
+    );
+    let (db_path, _dir) = setup_fixture(jsonl);
+    let agg = Aggregator::open(&db_path).unwrap();
+
+    let stats = agg.dashboard_stats().unwrap();
+    assert_eq!(stats.total_input_tokens, 1000);
+    assert_eq!(stats.total_output_tokens, 500);
+    assert_eq!(stats.total_cache_read, 200);
+    assert!(stats.spend_all_time > 0.0);
+    // Historical data won't match "today" or "this week" due to fixed timestamps
+    assert_eq!(stats.spend_today, 0.0, "2025-01-15 data is not today");
+}
+
+#[test]
+fn test_project_costs_aggregation() {
+    let dir = tempfile::tempdir().unwrap();
+    let projects_dir = dir.path().join("projects");
+
+    // Two projects with different costs
+    let proj_a = projects_dir.join("-Users-test-alpha");
+    let proj_b = projects_dir.join("-Users-test-beta");
+    fs::create_dir_all(&proj_a).unwrap();
+    fs::create_dir_all(&proj_b).unwrap();
+
+    let jsonl_a = concat!(
+        r#"{"uuid":"a1","sessionId":"sA","type":"user","timestamp":"2025-01-15T10:00:00Z","parentUuid":null,"message":{"role":"user"}}"#,
+        "\n",
+        r#"{"uuid":"a2","sessionId":"sA","type":"assistant","timestamp":"2025-01-15T10:00:01Z","message":{"model":"claude-opus-4-20250514","role":"assistant","usage":{"input_tokens":5000,"output_tokens":2000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
+    );
+    let jsonl_b = concat!(
+        r#"{"uuid":"b1","sessionId":"sB","type":"user","timestamp":"2025-01-15T11:00:00Z","parentUuid":null,"message":{"role":"user"}}"#,
+        "\n",
+        r#"{"uuid":"b2","sessionId":"sB","type":"assistant","timestamp":"2025-01-15T11:00:01Z","message":{"model":"claude-sonnet-4-6-20250514","role":"assistant","usage":{"input_tokens":1000,"output_tokens":500,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
+    );
+    fs::write(proj_a.join("sA.jsonl"), jsonl_a).unwrap();
+    fs::write(proj_b.join("sB.jsonl"), jsonl_b).unwrap();
+
+    let db_path = dir.path().join("test_proj.db");
+    let db = Database::open(&db_path).unwrap();
+    for f in &scan_projects(&projects_dir).unwrap() {
+        db.ingest_file(f).unwrap();
+    }
+    drop(db);
+
+    let agg = Aggregator::open(&db_path).unwrap();
+    let costs = agg.project_costs().unwrap();
+    assert_eq!(costs.len(), 2);
+    // Costs should sum to ~100%
+    let pct_sum: f64 = costs.iter().map(|c| c.percentage).sum();
+    assert!((pct_sum - 100.0).abs() < 0.1, "percentages should sum to 100, got {pct_sum}");
+    // Each project should have positive cost
+    assert!(costs.iter().all(|c| c.cost > 0.0));
+}
+
+#[test]
+fn test_empty_db_no_panics() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("empty.db");
+    let db = Database::open(&db_path).unwrap();
+    drop(db);
+
+    let agg = Aggregator::open(&db_path).unwrap();
+    let stats = agg.dashboard_stats().unwrap();
+    assert_eq!(stats.total_sessions, 0);
+    assert_eq!(stats.total_messages, 0);
+    assert_eq!(stats.spend_all_time, 0.0);
+
+    let models = agg.model_breakdown().unwrap();
+    assert!(models.is_empty());
+
+    let sessions = agg.sessions_list(10).unwrap();
+    assert!(sessions.is_empty());
+
+    let eff = agg.efficiency_stats().unwrap();
+    assert_eq!(eff.tokens_per_dollar, 0.0);
+
+    let projects = agg.project_costs().unwrap();
+    assert!(projects.is_empty());
+
+    let cache = agg.cache_hit_ratio().unwrap();
+    assert_eq!(cache, 0.0);
 }
