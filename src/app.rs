@@ -923,6 +923,8 @@ mod tests {
             started_at: "2025-01-01T00:00:00Z".to_string(),
             updated_at: "2025-01-01T01:00:00Z".to_string(),
             provider: "claude".to_string(),
+            subagent_count: 0,
+            sidechain_cost: 0.0,
         }
     }
 

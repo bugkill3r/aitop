@@ -44,6 +44,10 @@ pub struct SessionSummary {
     pub started_at: String,
     pub updated_at: String,
     pub provider: String,
+    /// Number of subagents spawned via the `Task` tool in this session.
+    pub subagent_count: i64,
+    /// Cost spent inside subagent (sidechain) executions, in USD.
+    pub sidechain_cost: f64,
 }
 
 /// Daily spend data point.
@@ -293,12 +297,19 @@ impl Aggregator {
     }
 
     pub fn sessions_list(&self, limit: usize) -> Result<Vec<SessionSummary>> {
+        // Sidechain rollup + Task spawn count are computed per-session in two
+        // correlated subqueries so the outer GROUP BY stays simple. Both
+        // subqueries tolerate the column not existing on very old DBs because
+        // the migration adds them before any read happens via `open_*`.
         let mut stmt = self.conn.prepare(
             "SELECT s.id, s.project, COALESCE(s.model, 'unknown'), s.started_at, s.updated_at,
                     COALESCE(SUM(m.cost_usd), 0),
                     COALESCE(SUM(m.input_tokens + m.output_tokens), 0),
                     COUNT(m.id),
-                    COALESCE(s.provider, 'claude')
+                    COALESCE(s.provider, 'claude'),
+                    COALESCE((SELECT COUNT(*) FROM agent_spawns sp WHERE sp.session_id = s.id), 0),
+                    COALESCE((SELECT SUM(m2.cost_usd) FROM messages m2
+                              WHERE m2.session_id = s.id AND m2.is_sidechain = 1), 0)
              FROM sessions s
              LEFT JOIN messages m ON s.id = m.session_id
              GROUP BY s.id
@@ -317,6 +328,8 @@ impl Aggregator {
                 total_tokens: row.get(6)?,
                 msg_count: row.get(7)?,
                 provider: row.get(8)?,
+                subagent_count: row.get(9)?,
+                sidechain_cost: row.get(10)?,
             })
         })?;
 

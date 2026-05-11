@@ -52,7 +52,7 @@ pub fn render_sessions(f: &mut Frame, state: &mut AppState, theme: &Theme) {
         });
 
     let header = Row::new(vec![
-        "#", "Project", "Model", "Tokens", "Cost", "Msgs", "7d", "Updated",
+        "#", "Project", "Model", "Tokens", "Cost", "Msgs", "Sub", "7d", "Updated",
     ])
     .style(
         Style::default()
@@ -83,6 +83,12 @@ pub fn render_sessions(f: &mut Frame, state: &mut AppState, theme: &Theme) {
                 .map(|costs| render_sparkline(costs))
                 .unwrap_or_else(|| "\u{2581}\u{2581}\u{2581}\u{2581}\u{2581}\u{2581}\u{2581}".to_string());
 
+            let subagent_cell = if s.subagent_count > 0 {
+                format!("\u{25B8}{}", s.subagent_count)
+            } else {
+                "\u{2500}".to_string()
+            };
+
             Row::new(vec![
                 format!("{}", i + 1),
                 truncate(&s.project, 14),
@@ -90,6 +96,7 @@ pub fn render_sessions(f: &mut Frame, state: &mut AppState, theme: &Theme) {
                 format_tokens(s.total_tokens),
                 format!("${:.2}", s.total_cost),
                 s.msg_count.to_string(),
+                subagent_cell,
                 sparkline,
                 format_relative_time(&s.updated_at),
             ])
@@ -106,6 +113,7 @@ pub fn render_sessions(f: &mut Frame, state: &mut AppState, theme: &Theme) {
             Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(6),
+            Constraint::Length(5),
             Constraint::Length(8),
             Constraint::Min(10),
         ],

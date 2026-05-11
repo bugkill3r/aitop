@@ -2,7 +2,7 @@ use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::path::Path;
 
-use super::parser::{ParsedMessage, ParsedSession};
+use super::parser::{ParsedAgentSpawn, ParsedMessage, ParsedSession};
 use super::pricing::PricingRegistry;
 use super::scanner::SessionFile;
 
@@ -49,12 +49,32 @@ impl Database {
                 cache_read      INTEGER DEFAULT 0,
                 cache_creation  INTEGER DEFAULT 0,
                 cost_usd        REAL DEFAULT 0.0,
-                provider        TEXT DEFAULT 'claude'
+                provider        TEXT DEFAULT 'claude',
+                is_sidechain    INTEGER DEFAULT 0,
+                parent_uuid     TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
             CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
             CREATE INDEX IF NOT EXISTS idx_messages_model ON messages(model);
+            -- idx_messages_sidechain is created in migrate() so that v2-era
+            -- databases (which lack the is_sidechain column at this point)
+            -- can still run create_tables without erroring; migrate() runs
+            -- right after this and adds the column + index in lockstep.
+
+            CREATE TABLE IF NOT EXISTS agent_spawns (
+                session_id        TEXT NOT NULL,
+                parent_msg_uuid   TEXT NOT NULL,
+                tool_use_id       TEXT NOT NULL,
+                subagent_type     TEXT,
+                prompt_preview    TEXT,
+                timestamp         TEXT NOT NULL,
+                PRIMARY KEY (session_id, tool_use_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_spawns_session
+                ON agent_spawns(session_id);
+            CREATE INDEX IF NOT EXISTS idx_agent_spawns_parent
+                ON agent_spawns(parent_msg_uuid);
 
             CREATE TABLE IF NOT EXISTS file_index (
                 path        TEXT PRIMARY KEY,
@@ -84,6 +104,38 @@ impl Database {
                 "ALTER TABLE messages ADD COLUMN provider TEXT DEFAULT 'claude';"
             );
             self.set_schema_version(2)?;
+        }
+
+        if version < 3 {
+            // Harness era: track subagent executions and Task spawns. Both
+            // ALTERs are wrapped in `let _ =` because they error harmlessly
+            // when the column already exists on a fresh-schema DB.
+            let _ = self.conn.execute_batch(
+                "ALTER TABLE messages ADD COLUMN is_sidechain INTEGER DEFAULT 0;",
+            );
+            let _ = self.conn.execute_batch(
+                "ALTER TABLE messages ADD COLUMN parent_uuid TEXT;",
+            );
+            let _ = self.conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_messages_sidechain
+                    ON messages(session_id, is_sidechain);",
+            );
+            let _ = self.conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS agent_spawns (
+                    session_id        TEXT NOT NULL,
+                    parent_msg_uuid   TEXT NOT NULL,
+                    tool_use_id       TEXT NOT NULL,
+                    subagent_type     TEXT,
+                    prompt_preview    TEXT,
+                    timestamp         TEXT NOT NULL,
+                    PRIMARY KEY (session_id, tool_use_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_spawns_session
+                    ON agent_spawns(session_id);
+                CREATE INDEX IF NOT EXISTS idx_agent_spawns_parent
+                    ON agent_spawns(parent_msg_uuid);",
+            );
+            self.set_schema_version(3)?;
         }
 
         Ok(())
@@ -158,8 +210,8 @@ impl Database {
 
     pub fn insert_message(&self, msg: &ParsedMessage) -> Result<()> {
         self.conn.execute(
-            "INSERT OR IGNORE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT OR IGNORE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider, is_sidechain, parent_uuid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 msg.uuid,
                 msg.session_id,
@@ -172,6 +224,26 @@ impl Database {
                 msg.cache_creation,
                 msg.cost_usd,
                 msg.provider,
+                msg.is_sidechain as i64,
+                msg.parent_uuid,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Persist a Task tool_use spawn. Idempotent on (session_id, tool_use_id).
+    pub fn insert_agent_spawn(&self, spawn: &ParsedAgentSpawn) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO agent_spawns
+                (session_id, parent_msg_uuid, tool_use_id, subagent_type, prompt_preview, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                spawn.session_id,
+                spawn.parent_msg_uuid,
+                spawn.tool_use_id,
+                spawn.subagent_type,
+                spawn.prompt_preview,
+                spawn.timestamp,
             ],
         )?;
         Ok(())
@@ -205,21 +277,21 @@ impl Database {
         &self,
         file: &SessionFile,
         new_offset: u64,
-        results: &[(Option<super::parser::ParsedSession>, Option<super::parser::ParsedMessage>)],
+        results: &[super::parser::ParsedTuple],
     ) -> Result<()> {
         let path_str = file.path.to_string_lossy().to_string();
         let tx = self.conn.unchecked_transaction()?;
 
-        for (session, message) in results {
+        for (session, message, spawns) in results {
             if let Some(s) = session {
                 tx.execute(
-                    "INSERT INTO sessions (id, project, started_at, updated_at, model, version)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    "INSERT INTO sessions (id, project, started_at, updated_at, model, version, provider)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                      ON CONFLICT(id) DO UPDATE SET
                         updated_at = MAX(sessions.updated_at, ?4),
                         model = COALESCE(?5, sessions.model),
                         version = COALESCE(?6, sessions.version)",
-                    params![s.id, s.project, s.started_at, s.updated_at, s.model, s.version],
+                    params![s.id, s.project, s.started_at, s.updated_at, s.model, s.version, s.provider],
                 )?;
             }
             if let Some(m) = message {
@@ -230,9 +302,24 @@ impl Database {
                     )?;
                 }
                 tx.execute(
-                    "INSERT OR REPLACE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                    params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd],
+                    "INSERT OR REPLACE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider, is_sidechain, parent_uuid)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    params![
+                        m.uuid, m.session_id, m.msg_type, m.timestamp, m.model,
+                        m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd,
+                        m.provider, m.is_sidechain as i64, m.parent_uuid,
+                    ],
+                )?;
+            }
+            for spawn in spawns {
+                tx.execute(
+                    "INSERT OR IGNORE INTO agent_spawns
+                        (session_id, parent_msg_uuid, tool_use_id, subagent_type, prompt_preview, timestamp)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        spawn.session_id, spawn.parent_msg_uuid, spawn.tool_use_id,
+                        spawn.subagent_type, spawn.prompt_preview, spawn.timestamp,
+                    ],
                 )?;
             }
         }
@@ -298,7 +385,7 @@ impl Database {
 
         let tx = self.conn.unchecked_transaction()?;
 
-        for (session, message) in &results {
+        for (session, message, spawns) in &results {
             if let Some(s) = session {
                 tx.execute(
                     "INSERT INTO sessions (id, project, started_at, updated_at, model, version, provider)
@@ -319,9 +406,24 @@ impl Database {
                     )?;
                 }
                 tx.execute(
-                    "INSERT OR REPLACE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd, m.provider],
+                    "INSERT OR REPLACE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider, is_sidechain, parent_uuid)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    params![
+                        m.uuid, m.session_id, m.msg_type, m.timestamp, m.model,
+                        m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd,
+                        m.provider, m.is_sidechain as i64, m.parent_uuid,
+                    ],
+                )?;
+            }
+            for spawn in spawns {
+                tx.execute(
+                    "INSERT OR IGNORE INTO agent_spawns
+                        (session_id, parent_msg_uuid, tool_use_id, subagent_type, prompt_preview, timestamp)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        spawn.session_id, spawn.parent_msg_uuid, spawn.tool_use_id,
+                        spawn.subagent_type, spawn.prompt_preview, spawn.timestamp,
+                    ],
                 )?;
             }
         }
@@ -395,9 +497,13 @@ impl Database {
                 )?;
             }
             tx.execute(
-                "INSERT OR IGNORE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd, m.provider],
+                "INSERT OR IGNORE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider, is_sidechain, parent_uuid)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    m.uuid, m.session_id, m.msg_type, m.timestamp, m.model,
+                    m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd,
+                    m.provider, m.is_sidechain as i64, m.parent_uuid,
+                ],
             )?;
         }
 

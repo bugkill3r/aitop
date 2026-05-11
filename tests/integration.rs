@@ -1,5 +1,4 @@
 use std::fs;
-use std::io::Write;
 
 use aitop::data::aggregator::Aggregator;
 use aitop::data::db::Database;
@@ -244,6 +243,55 @@ fn test_project_costs_aggregation() {
     assert!((pct_sum - 100.0).abs() < 0.1, "percentages should sum to 100, got {pct_sum}");
     // Each project should have positive cost
     assert!(costs.iter().all(|c| c.cost > 0.0));
+}
+
+#[test]
+fn test_sidechain_rollup_end_to_end() {
+    // Orchestrator spawns one subagent via Task; the subagent's assistant
+    // turn is marked isSidechain=true. The session summary should expose
+    // subagent_count=1 and sidechain_cost > 0.
+    let jsonl = concat!(
+        // 1. Initial user prompt (opens session)
+        r#"{"uuid":"u1","sessionId":"sess-x","type":"user","timestamp":"2025-02-01T12:00:00Z","parentUuid":null,"isSidechain":false,"message":{"role":"user"}}"#,
+        "\n",
+        // 2. Orchestrator assistant turn with a Task tool_use spawning a subagent
+        r#"{"uuid":"u2","sessionId":"sess-x","type":"assistant","timestamp":"2025-02-01T12:00:01Z","parentUuid":"u1","isSidechain":false,"message":{"id":"msg_orch","model":"claude-opus-4-7","role":"assistant","usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"tool_use","id":"toolu_sub","name":"Task","input":{"subagent_type":"Explore","prompt":"find call sites"}}]}}"#,
+        "\n",
+        // 3. Sidechain user message (subagent prompt)
+        r#"{"uuid":"u3","sessionId":"sess-x","type":"user","timestamp":"2025-02-01T12:00:02Z","parentUuid":"u2","isSidechain":true,"message":{"role":"user"}}"#,
+        "\n",
+        // 4. Sidechain assistant turn (subagent's work)
+        r#"{"uuid":"u4","sessionId":"sess-x","type":"assistant","timestamp":"2025-02-01T12:00:03Z","parentUuid":"u3","isSidechain":true,"message":{"id":"msg_sub","model":"claude-haiku-4-5-20251001","role":"assistant","usage":{"input_tokens":500,"output_tokens":200,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
+    );
+    let (db_path, _dir) = setup_fixture(jsonl);
+
+    let agg = Aggregator::open(&db_path).unwrap();
+    let sessions = agg.sessions_list(10).unwrap();
+    assert_eq!(sessions.len(), 1);
+    let s = &sessions[0];
+    assert_eq!(s.subagent_count, 1, "exactly one Task spawn");
+    assert!(s.sidechain_cost > 0.0, "subagent assistant turn must accrue cost");
+    assert!(
+        s.total_cost > s.sidechain_cost,
+        "total cost includes orchestrator on top of sidechain",
+    );
+}
+
+#[test]
+fn test_sidechain_rollup_zero_for_flat_sessions() {
+    // A vanilla orchestrator-only session (no Task spawns, no sidechains)
+    // must report subagent_count=0 and sidechain_cost=0.
+    let jsonl = concat!(
+        r#"{"uuid":"u1","sessionId":"sess-y","type":"user","timestamp":"2025-02-01T12:00:00Z","parentUuid":null,"message":{"role":"user"}}"#,
+        "\n",
+        r#"{"uuid":"u2","sessionId":"sess-y","type":"assistant","timestamp":"2025-02-01T12:00:01Z","message":{"model":"claude-sonnet-4-6-20250514","role":"assistant","usage":{"input_tokens":50,"output_tokens":50}}}"#,
+    );
+    let (db_path, _dir) = setup_fixture(jsonl);
+    let agg = Aggregator::open(&db_path).unwrap();
+    let sessions = agg.sessions_list(10).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].subagent_count, 0);
+    assert_eq!(sessions[0].sidechain_cost, 0.0);
 }
 
 #[test]
