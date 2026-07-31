@@ -169,6 +169,7 @@ fn parse_gemini_session_str(
             cost_usd: cost,
             project: project.to_string(),
             provider: "gemini".to_string(),
+            content: None,
         });
     }
 

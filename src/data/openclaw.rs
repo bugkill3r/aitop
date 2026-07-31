@@ -231,6 +231,7 @@ pub fn parse_openclaw_file(
                                 cost_usd: 0.0,
                                 project: project.to_string(),
                                 provider: "openclaw".to_string(),
+                                content: None,
                             });
                         }
                         "assistant" => {
@@ -284,6 +285,7 @@ pub fn parse_openclaw_file(
                                 cost_usd: cost,
                                 project: project.to_string(),
                                 provider: "openclaw".to_string(),
+                                content: None,
                             });
                         }
                         _ => {}

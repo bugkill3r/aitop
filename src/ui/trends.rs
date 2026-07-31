@@ -252,7 +252,7 @@ fn render_bar_chart(
             if day.date.len() >= 10 {
                 format!("{:<width$}", &day.date[5..10], width = slot_width)
             } else {
-                format!("{:<width$}", &day.date, width = slot_width)
+                format!("{:<width$}", day.date, width = slot_width)
             }
         } else {
             " ".repeat(slot_width)

@@ -87,6 +87,8 @@ pub struct SessionMessage {
     pub cache_read: i64,
     pub cache_creation: i64,
     pub cost_usd: f64,
+    /// Prompt text for real typed user messages; None otherwise.
+    pub content: Option<String>,
 }
 
 /// Delta banner data: changes since last check.
@@ -666,7 +668,7 @@ impl Aggregator {
     pub fn session_detail(&self, session_id: &str) -> Result<Vec<SessionMessage>> {
         let mut stmt = self.conn.prepare(
             "SELECT m.id, m.timestamp, COALESCE(m.model, 'unknown'), m.type,
-                    m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd
+                    m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd, m.content
              FROM messages m
              WHERE m.session_id = ?1
              ORDER BY m.timestamp ASC",
@@ -683,6 +685,7 @@ impl Aggregator {
                 cache_read: row.get(6)?,
                 cache_creation: row.get(7)?,
                 cost_usd: row.get(8)?,
+                content: row.get(9)?,
             })
         })?;
 

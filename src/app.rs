@@ -731,6 +731,7 @@ mod tests {
                 cache_read: 0,
                 cache_creation: 0,
                 cost_usd: 0.01 * (i as f64 + 1.0),
+                content: None,
             })
             .collect()
     }

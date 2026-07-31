@@ -49,7 +49,8 @@ impl Database {
                 cache_read      INTEGER DEFAULT 0,
                 cache_creation  INTEGER DEFAULT 0,
                 cost_usd        REAL DEFAULT 0.0,
-                provider        TEXT DEFAULT 'claude'
+                provider        TEXT DEFAULT 'claude',
+                content         TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
@@ -84,6 +85,20 @@ impl Database {
                 "ALTER TABLE messages ADD COLUMN provider TEXT DEFAULT 'claude';"
             );
             self.set_schema_version(2)?;
+        }
+
+        if version < 3 {
+            // Add prompt-text column to messages.
+            let _ = self.conn.execute_batch(
+                "ALTER TABLE messages ADD COLUMN content TEXT;"
+            );
+            // Force Claude JSONL files to be re-read from the start so existing
+            // history gets its prompt text backfilled (INSERT OR REPLACE keeps
+            // token/cost data identical while populating the new column).
+            let _ = self.conn.execute_batch(
+                "UPDATE file_index SET last_offset = 0;"
+            );
+            self.set_schema_version(3)?;
         }
 
         Ok(())
@@ -158,8 +173,8 @@ impl Database {
 
     pub fn insert_message(&self, msg: &ParsedMessage) -> Result<()> {
         self.conn.execute(
-            "INSERT OR IGNORE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT OR IGNORE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider, content)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 msg.uuid,
                 msg.session_id,
@@ -172,6 +187,7 @@ impl Database {
                 msg.cache_creation,
                 msg.cost_usd,
                 msg.provider,
+                msg.content,
             ],
         )?;
         Ok(())
@@ -230,9 +246,9 @@ impl Database {
                     )?;
                 }
                 tx.execute(
-                    "INSERT OR REPLACE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                    params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd],
+                    "INSERT OR REPLACE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, content)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd, m.content],
                 )?;
             }
         }
@@ -319,9 +335,9 @@ impl Database {
                     )?;
                 }
                 tx.execute(
-                    "INSERT OR REPLACE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd, m.provider],
+                    "INSERT OR REPLACE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider, content)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd, m.provider, m.content],
                 )?;
             }
         }
@@ -395,9 +411,9 @@ impl Database {
                 )?;
             }
             tx.execute(
-                "INSERT OR IGNORE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd, m.provider],
+                "INSERT OR IGNORE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider, content)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd, m.provider, m.content],
             )?;
         }
 

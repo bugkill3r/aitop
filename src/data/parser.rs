@@ -16,6 +16,9 @@ pub struct ParsedMessage {
     pub cost_usd: f64,
     pub project: String,
     pub provider: String,
+    /// Plain-text prompt for real typed user messages; None for assistant
+    /// messages and structured (tool-result) user messages.
+    pub content: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +55,26 @@ struct RawMessage {
     #[allow(dead_code)]
     role: Option<String>,
     usage: Option<RawUsage>,
+    #[serde(default)]
+    content: Option<serde_json::Value>,
+}
+
+/// Extract a plain-text prompt from a user message's `content`.
+/// Real typed prompts serialize `content` as a JSON string; tool results and
+/// other structured messages use an array of blocks, which we skip (return
+/// None) so the prompt timeline only surfaces things the user actually typed.
+fn extract_prompt_text(message: &Option<RawMessage>) -> Option<String> {
+    match message.as_ref()?.content.as_ref()? {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        _ => None,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +109,7 @@ pub fn parse_jsonl_line(
 
     match entry_type {
         "user" => {
+            let prompt_text = extract_prompt_text(&entry.message);
             // First user message defines the session
             if entry.parent_uuid.is_none() {
                 let session = ParsedSession {
@@ -110,6 +134,7 @@ pub fn parse_jsonl_line(
                     cost_usd: 0.0,
                     project: project.to_string(),
                     provider: "claude".to_string(),
+                    content: prompt_text.clone(),
                 };
                 Some((Some(session), Some(msg)))
             } else {
@@ -126,6 +151,7 @@ pub fn parse_jsonl_line(
                     cost_usd: 0.0,
                     project: project.to_string(),
                     provider: "claude".to_string(),
+                    content: prompt_text,
                 };
                 Some((None, Some(msg)))
             }
@@ -162,6 +188,7 @@ pub fn parse_jsonl_line(
                 cost_usd: cost,
                 project: project.to_string(),
                 provider: "claude".to_string(),
+                content: None,
             };
             Some((None, Some(msg)))
         }
@@ -286,6 +313,31 @@ mod tests {
         assert_eq!(msg.cache_read, 200);
         assert!(msg.cost_usd > 0.0);
         assert_eq!(msg.provider, "claude");
+    }
+
+    #[test]
+    fn test_user_prompt_text_captured() {
+        let pricing = PricingRegistry::builtin();
+        let line = r#"{"uuid":"u1","sessionId":"s1","type":"user","timestamp":"2025-01-15T10:00:00Z","parentUuid":null,"message":{"role":"user","content":"fix the bulk update bug"}}"#;
+        let (_, msg) = parse_jsonl_line(line, "proj", &pricing).unwrap();
+        assert_eq!(msg.unwrap().content.as_deref(), Some("fix the bulk update bug"));
+    }
+
+    #[test]
+    fn test_tool_result_content_skipped() {
+        let pricing = PricingRegistry::builtin();
+        // Tool results arrive as type:"user" but content is an array — not a prompt.
+        let line = r#"{"uuid":"u2","sessionId":"s1","type":"user","timestamp":"2025-01-15T10:00:00Z","parentUuid":"u1","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}"#;
+        let (_, msg) = parse_jsonl_line(line, "proj", &pricing).unwrap();
+        assert_eq!(msg.unwrap().content, None);
+    }
+
+    #[test]
+    fn test_assistant_has_no_prompt_text() {
+        let pricing = PricingRegistry::builtin();
+        let line = make_assistant_line("u3", "s1");
+        let (_, msg) = parse_jsonl_line(&line, "proj", &pricing).unwrap();
+        assert_eq!(msg.unwrap().content, None);
     }
 
     #[test]
