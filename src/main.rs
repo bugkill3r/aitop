@@ -567,11 +567,8 @@ fn handle_sessions_key(state: &mut AppState, key: event::KeyEvent, agg: &Aggrega
         KeyCode::Up | KeyCode::Char('k') => state.prev_session(),
         KeyCode::Enter => {
             if let Some(session_id) = state.selected_session_id() {
-                if let Ok(messages) = agg.session_detail(&session_id) {
-                    state.detail_messages = messages;
-                }
-                state.detail_session = Some(session_id);
-                state.detail_scroll = 0;
+                let messages = agg.session_detail(&session_id).unwrap_or_default();
+                state.open_detail(session_id, messages);
             }
         }
         KeyCode::Char('y') => {
@@ -614,12 +611,13 @@ fn toggle_sort(state: &mut AppState, sort: SessionSort) {
 fn handle_detail_key(state: &mut AppState, key: event::KeyEvent) {
     match key.code {
         KeyCode::Esc => {
-            state.detail_session = None;
-            state.detail_messages.clear();
-            state.detail_scroll = 0;
+            state.close_detail();
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            let max = state.detail_messages.len().saturating_sub(1);
+            // Clamp to the turn count the view actually renders. Clamping to the
+            // message count instead let the scroll run far past the last visible
+            // row, so scrolling back up looked like a hang.
+            let max = state.detail_max_scroll();
             state.detail_scroll = (state.detail_scroll + 1).min(max);
         }
         KeyCode::Up | KeyCode::Char('k') => {

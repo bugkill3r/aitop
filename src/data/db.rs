@@ -95,10 +95,27 @@ impl Database {
             // Force Claude JSONL files to be re-read from the start so existing
             // history gets its prompt text backfilled (INSERT OR REPLACE keeps
             // token/cost data identical while populating the new column).
+            //
+            // The reset is deliberately unscoped. It touches Gemini and OpenClaw
+            // rows too, but that is a no-op for them: `ingest_parsed` gates on
+            // `last_mtime` and never reads `last_offset`. Only the Claude path
+            // (`write_parsed_results`) is offset-driven, so only it re-reads.
             let _ = self.conn.execute_batch(
                 "UPDATE file_index SET last_offset = 0;"
             );
             self.set_schema_version(3)?;
+        }
+
+        if version < 4 {
+            // v3 backfilled prompt text, but only for string-form `content`.
+            // Array-form prompts (any prompt with an attached image, plus a
+            // number of plain-text cases) were skipped by the parser and landed
+            // with content NULL. The parser now reads them, so re-read once more
+            // to pick them up. No schema change — the column already exists.
+            let _ = self.conn.execute_batch(
+                "UPDATE file_index SET last_offset = 0;"
+            );
+            self.set_schema_version(4)?;
         }
 
         Ok(())
@@ -246,9 +263,12 @@ impl Database {
                     )?;
                 }
                 tx.execute(
-                    "INSERT OR REPLACE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, content)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd, m.content],
+                    // `provider` is written explicitly: REPLACE deletes and
+                    // re-inserts the row, so an omitted column would silently
+                    // fall back to its default on every backfilled row.
+                    "INSERT OR REPLACE INTO messages (id, session_id, type, timestamp, model, input_tokens, output_tokens, cache_read, cache_creation, cost_usd, provider, content)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    params![m.uuid, m.session_id, m.msg_type, m.timestamp, m.model, m.input_tokens, m.output_tokens, m.cache_read, m.cache_creation, m.cost_usd, m.provider, m.content],
                 )?;
             }
         }

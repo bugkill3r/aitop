@@ -6,6 +6,7 @@ use ratatui::widgets::TableState;
 
 use crate::config::Config;
 use crate::data::aggregator::*;
+use crate::ui::session_detail::{build_turns, Turn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -77,6 +78,10 @@ pub struct AppState {
     // Session detail popup
     pub detail_session: Option<String>,
     pub detail_messages: Vec<SessionMessage>,
+    /// Prompt timeline for `detail_messages`, built once on open. Kept on state
+    /// rather than rebuilt per frame so the key handler can clamp scrolling to
+    /// the same bounds the view renders.
+    pub detail_turns: Vec<Turn>,
     pub detail_scroll: usize,
 
     // Filter/search
@@ -165,6 +170,7 @@ impl AppState {
 
             detail_session: None,
             detail_messages: Vec::new(),
+            detail_turns: Vec::new(),
             detail_scroll: 0,
 
             filter_text: String::new(),
@@ -429,6 +435,31 @@ impl AppState {
         } else {
             self.split_view = None;
         }
+    }
+
+    /// Open the session detail popup, building the prompt timeline once.
+    ///
+    /// All detail state is set here so `detail_turns` can never drift out of
+    /// sync with `detail_messages` — the scroll bounds depend on it.
+    pub fn open_detail(&mut self, session_id: String, messages: Vec<SessionMessage>) {
+        self.detail_turns = build_turns(&messages);
+        self.detail_messages = messages;
+        self.detail_session = Some(session_id);
+        self.detail_scroll = 0;
+    }
+
+    /// Close the session detail popup and clear its state.
+    pub fn close_detail(&mut self) {
+        self.detail_session = None;
+        self.detail_messages.clear();
+        self.detail_turns.clear();
+        self.detail_scroll = 0;
+    }
+
+    /// Largest valid `detail_scroll` value: the timeline is scrolled by turn,
+    /// not by message, so this is the turn count (not the message count).
+    pub fn detail_max_scroll(&self) -> usize {
+        self.detail_turns.len().saturating_sub(1)
     }
 
     /// Enter replay mode for the current session detail.

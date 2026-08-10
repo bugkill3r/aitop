@@ -59,22 +59,62 @@ struct RawMessage {
     content: Option<serde_json::Value>,
 }
 
+/// Text that Claude Code injects as a `user` entry but that nobody typed.
+/// Matched as an anchored prefix (not a substring) so a real prompt that merely
+/// mentions one of these is not dropped.
+const INJECTED_PROMPT_PREFIXES: &[&str] = &[
+    // Covers both "[Request interrupted by user]" and the "…for tool use]" variant.
+    "[Request interrupted by user",
+    "Base directory for this skill:",
+];
+
 /// Extract a plain-text prompt from a user message's `content`.
-/// Real typed prompts serialize `content` as a JSON string; tool results and
-/// other structured messages use an array of blocks, which we skip (return
-/// None) so the prompt timeline only surfaces things the user actually typed.
+///
+/// Claude Code serializes a typed prompt either as a bare JSON string or, when
+/// the prompt carries an attachment (image/document) or was assembled from
+/// blocks, as an array of content blocks. Both are real prompts. A `tool_result`
+/// block anywhere in the array marks the entry as a tool response instead, which
+/// is not a prompt and returns None.
+///
+/// Dropping a real prompt here is worse than it looks: `build_turns` would fold
+/// its assistant work into the preceding turn, inflating that turn's iteration
+/// count and cost. So the only things filtered out are the exact injected
+/// markers above and genuinely empty text.
 fn extract_prompt_text(message: &Option<RawMessage>) -> Option<String> {
-    match message.as_ref()?.content.as_ref()? {
-        serde_json::Value::String(s) => {
-            let trimmed = s.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        }
-        _ => None,
+    fn block_type(block: &serde_json::Value) -> Option<&str> {
+        block.get("type")?.as_str()
     }
+
+    let text = match message.as_ref()?.content.as_ref()? {
+        serde_json::Value::String(s) => s.trim().to_string(),
+        serde_json::Value::Array(blocks) => {
+            if blocks
+                .iter()
+                .any(|b| block_type(b) == Some("tool_result"))
+            {
+                return None;
+            }
+            // Keep the text blocks; image/document blocks carry no prompt text.
+            blocks
+                .iter()
+                .filter(|b| block_type(b) == Some("text"))
+                .filter_map(|b| b.get("text")?.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .trim()
+                .to_string()
+        }
+        _ => return None,
+    };
+
+    if text.is_empty()
+        || INJECTED_PROMPT_PREFIXES
+            .iter()
+            .any(|p| text.starts_with(p))
+    {
+        return None;
+    }
+    Some(text)
 }
 
 #[derive(Debug, Deserialize)]
@@ -328,6 +368,61 @@ mod tests {
         let pricing = PricingRegistry::builtin();
         // Tool results arrive as type:"user" but content is an array — not a prompt.
         let line = r#"{"uuid":"u2","sessionId":"s1","type":"user","timestamp":"2025-01-15T10:00:00Z","parentUuid":"u1","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}"#;
+        let (_, msg) = parse_jsonl_line(line, "proj", &pricing).unwrap();
+        assert_eq!(msg.unwrap().content, None);
+    }
+
+    #[test]
+    fn test_prompt_with_image_attachment_captured() {
+        let pricing = PricingRegistry::builtin();
+        // A prompt with a pasted screenshot serializes as an image + text array.
+        // Dropping it would fold its assistant work into the previous turn.
+        let line = r#"{"uuid":"u4","sessionId":"s1","type":"user","timestamp":"2025-01-15T10:00:00Z","parentUuid":"u1","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","data":"xx"}},{"type":"text","text":"what about capping and pilot?"}]}}"#;
+        let (_, msg) = parse_jsonl_line(line, "proj", &pricing).unwrap();
+        assert_eq!(
+            msg.unwrap().content.as_deref(),
+            Some("what about capping and pilot?")
+        );
+    }
+
+    #[test]
+    fn test_text_only_array_prompt_captured() {
+        let pricing = PricingRegistry::builtin();
+        let line = r#"{"uuid":"u5","sessionId":"s1","type":"user","timestamp":"2025-01-15T10:00:00Z","parentUuid":"u1","message":{"role":"user","content":[{"type":"text","text":"first part"},{"type":"text","text":"second part"}]}}"#;
+        let (_, msg) = parse_jsonl_line(line, "proj", &pricing).unwrap();
+        assert_eq!(msg.unwrap().content.as_deref(), Some("first part second part"));
+    }
+
+    #[test]
+    fn test_injected_markers_skipped() {
+        let pricing = PricingRegistry::builtin();
+        for injected in [
+            "[Request interrupted by user]",
+            "[Request interrupted by user for tool use]",
+            "Base directory for this skill: /Users/x/.claude/plugins/cache/foo",
+        ] {
+            let line = format!(
+                r#"{{"uuid":"u6","sessionId":"s1","type":"user","timestamp":"2025-01-15T10:00:00Z","parentUuid":"u1","message":{{"role":"user","content":[{{"type":"text","text":{}}}]}}}}"#,
+                serde_json::to_string(injected).unwrap()
+            );
+            let (_, msg) = parse_jsonl_line(&line, "proj", &pricing).unwrap();
+            assert_eq!(msg.unwrap().content, None, "should skip {:?}", injected);
+        }
+    }
+
+    #[test]
+    fn test_prompt_mentioning_marker_is_kept() {
+        let pricing = PricingRegistry::builtin();
+        // The filter is an anchored prefix, not a substring match.
+        let line = r#"{"uuid":"u7","sessionId":"s1","type":"user","timestamp":"2025-01-15T10:00:00Z","parentUuid":"u1","message":{"role":"user","content":"why does it log [Request interrupted by user] here?"}}"#;
+        let (_, msg) = parse_jsonl_line(line, "proj", &pricing).unwrap();
+        assert!(msg.unwrap().content.is_some());
+    }
+
+    #[test]
+    fn test_attachment_only_message_has_no_prompt_text() {
+        let pricing = PricingRegistry::builtin();
+        let line = r#"{"uuid":"u8","sessionId":"s1","type":"user","timestamp":"2025-01-15T10:00:00Z","parentUuid":"u1","message":{"role":"user","content":[{"type":"document","source":{"type":"base64","data":"xx"}}]}}"#;
         let (_, msg) = parse_jsonl_line(line, "proj", &pricing).unwrap();
         assert_eq!(msg.unwrap().content, None);
     }

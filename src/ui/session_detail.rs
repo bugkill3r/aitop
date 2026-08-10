@@ -3,6 +3,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::format::{format_tokens, shorten_model};
 use super::theme::Theme;
@@ -35,8 +36,9 @@ pub fn render_session_detail(f: &mut Frame, state: &AppState, theme: &Theme) {
 
     let messages = &state.detail_messages;
 
-    // Collapse into turns once (a typed prompt + the assistant work it drove).
-    let turns = build_turns(messages);
+    // Turns are built once when the detail view opens (see `AppState::open_detail`),
+    // not per frame — the key handler needs the same count to clamp scrolling.
+    let turns = &state.detail_turns;
     // Session-level average efficiency across scored turns.
     let scored: Vec<u8> = turns.iter().filter_map(|t| t.efficiency_score()).collect();
     let avg_efficiency: Option<u8> = if scored.is_empty() {
@@ -284,7 +286,7 @@ pub fn render_session_detail(f: &mut Frame, state: &AppState, theme: &Theme) {
         // efficiency score derived from behavioral signals.
         lines.push(Line::from(vec![Span::styled(
             format!(
-                "  {:>4} {:<6} {:>6} {:>3} {:>9} {:>5}  {}",
+                "  {:>4} {:<6} {:>6} {:>3} {:>9} {:>4}  {}",
                 "#", "Time", "Out", "It", "Cost", "Eff", "Prompt"
             ),
             Style::default()
@@ -292,16 +294,27 @@ pub fn render_session_detail(f: &mut Frame, state: &AppState, theme: &Theme) {
                 .add_modifier(Modifier::BOLD),
         )]));
 
-        if turns.is_empty() {
+        // A session with only a `(pre-prompt)` bucket has no captured prompt
+        // text at all — explain why rather than showing a lone unnamed row.
+        let has_prompt = turns.iter().any(|t| !t.synthetic);
+        if !has_prompt {
+            // Only Claude sessions carry prompt text; the Gemini and OpenClaw
+            // parsers have no prompt field to read, so no restart will help.
+            let hint = if session.provider == "claude" {
+                "  No prompt text captured yet — restart aitop to backfill history."
+            } else {
+                "  Prompt capture is Claude-only — this provider records no prompt text."
+            };
             lines.push(Line::from(Span::styled(
-                "  No prompt text captured yet — restart aitop to backfill history.",
+                hint,
                 Style::default().fg(theme.text_dim),
             )));
         } else {
             let available_height = (inner.height as usize).saturating_sub(lines.len());
             let scroll = state.detail_scroll.min(turns.len().saturating_sub(1));
-            // Fixed-width prefix before the prompt column.
-            let prefix_width = 2 + 4 + 1 + 6 + 1 + 6 + 1 + 3 + 1 + 9 + 1 + 5 + 2;
+            // Fixed-width prefix before the prompt column: the 35-cell row
+            // format below, plus the 4-cell score, plus a 2-cell gap.
+            let prefix_width = 2 + 4 + 1 + 6 + 1 + 6 + 1 + 3 + 1 + 9 + 1 + 4 + 2;
             let prompt_width = (inner.width as usize).saturating_sub(prefix_width);
 
             for (i, turn) in turns.iter().enumerate().skip(scroll).take(available_height) {
@@ -343,9 +356,13 @@ pub fn render_session_detail(f: &mut Frame, state: &AppState, theme: &Theme) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Label for the synthetic turn holding messages that precede the first typed
+/// prompt (resumed sessions, or history whose prompt text was never captured).
+pub const PRE_PROMPT_LABEL: &str = "(pre-prompt)";
+
 /// One conversational turn: a typed user prompt plus the token/cost of all the
 /// assistant work it triggered (up to the next typed prompt).
-struct Turn {
+pub struct Turn {
     time: String,
     prompt: String,
     input: i64,
@@ -356,6 +373,10 @@ struct Turn {
     roundtrips: u32,
     cache_read: i64,
     cache_creation: i64,
+    /// True for the `(pre-prompt)` bucket, which has no typed prompt behind it.
+    /// It exists so those messages' tokens and cost still appear in the timeline
+    /// and the rows reconcile against the session header, but it is not scored.
+    synthetic: bool,
 }
 
 impl Turn {
@@ -366,9 +387,11 @@ impl Turn {
     /// Base score decays with the number of round-trips (a well-scoped prompt
     /// resolves in few iterations); it is then modulated by cache efficiency
     /// (poor context reuse signals churn). Returns None when the turn has no
-    /// assistant response yet (interrupted or still pending).
+    /// assistant response yet (interrupted or still pending), and for the
+    /// synthetic `(pre-prompt)` bucket — scoring it would attribute friction to
+    /// a prompt that does not exist.
     fn efficiency_score(&self) -> Option<u8> {
-        if self.roundtrips == 0 {
+        if self.roundtrips == 0 || self.synthetic {
             return None;
         }
         let base = 100.0 * (-((self.roundtrips as f64 - 1.0) / 10.0)).exp();
@@ -390,7 +413,12 @@ impl Turn {
 /// prompt (a `user` message with plain-text content); all subsequent messages
 /// — assistant responses and tool-result rows — are attributed to it until the
 /// next typed prompt.
-fn build_turns(messages: &[crate::data::aggregator::SessionMessage]) -> Vec<Turn> {
+///
+/// Messages that arrive before the first typed prompt (resumed sessions, or
+/// history predating prompt capture) go into a leading synthetic `(pre-prompt)`
+/// turn rather than being dropped, so the rows sum to the session total shown
+/// in the header above them.
+pub fn build_turns(messages: &[crate::data::aggregator::SessionMessage]) -> Vec<Turn> {
     let mut turns: Vec<Turn> = Vec::new();
     for m in messages {
         let is_prompt = m.msg_type == "user"
@@ -411,6 +439,19 @@ fn build_turns(messages: &[crate::data::aggregator::SessionMessage]) -> Vec<Turn
                 roundtrips: 0,
                 cache_read: 0,
                 cache_creation: 0,
+                synthetic: false,
+            });
+        } else if turns.is_empty() {
+            turns.push(Turn {
+                time: m.timestamp.get(11..16).unwrap_or("??:??").to_string(),
+                prompt: PRE_PROMPT_LABEL.to_string(),
+                input: 0,
+                output: 0,
+                cost: 0.0,
+                roundtrips: 0,
+                cache_read: 0,
+                cache_creation: 0,
+                synthetic: true,
             });
         }
         if let Some(turn) = turns.last_mut() {
@@ -438,18 +479,31 @@ fn score_color(score: Option<u8>, theme: &Theme) -> ratatui::style::Color {
     }
 }
 
-/// Truncate a string to `max` display characters, appending an ellipsis.
+/// Truncate a string to `max` terminal cells, appending an ellipsis.
+///
+/// Width is measured in display cells, not `char`s: a CJK codepoint occupies two
+/// cells, so a character-count truncation would overrun the column by up to 2x.
 fn clip(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-        out.push('\u{2026}');
-        out
+    if s.width() <= max {
+        return s.to_string();
     }
+    // Reserve one cell for the ellipsis.
+    let budget = max.saturating_sub(1);
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in s.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('\u{2026}');
+    out
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -520,16 +574,25 @@ mod tests {
         assert_eq!(turns[1].roundtrips, 1);
     }
 
+    /// A scored (non-synthetic) turn with the given friction inputs.
+    fn turn(roundtrips: u32, input: i64, cache_read: i64) -> Turn {
+        Turn {
+            time: String::new(),
+            prompt: String::new(),
+            input,
+            output: 0,
+            cost: 0.0,
+            roundtrips,
+            cache_read,
+            cache_creation: 0,
+            synthetic: false,
+        }
+    }
+
     #[test]
     fn test_efficiency_score_clean_beats_churny() {
-        let clean = Turn {
-            time: String::new(), prompt: String::new(),
-            input: 0, output: 0, cost: 0.0, roundtrips: 1, cache_read: 0, cache_creation: 0,
-        };
-        let churny = Turn {
-            time: String::new(), prompt: String::new(),
-            input: 0, output: 0, cost: 0.0, roundtrips: 40, cache_read: 0, cache_creation: 0,
-        };
+        let clean = turn(1, 0, 0);
+        let churny = turn(40, 0, 0);
         let clean_score = clean.efficiency_score().unwrap();
         let churny_score = churny.efficiency_score().unwrap();
         assert!(clean_score > churny_score, "clean {} should beat churny {}", clean_score, churny_score);
@@ -539,23 +602,87 @@ mod tests {
 
     #[test]
     fn test_efficiency_score_none_when_no_response() {
-        let pending = Turn {
-            time: String::new(), prompt: String::new(),
-            input: 0, output: 0, cost: 0.0, roundtrips: 0, cache_read: 0, cache_creation: 0,
-        };
-        assert_eq!(pending.efficiency_score(), None);
+        assert_eq!(turn(0, 0, 0).efficiency_score(), None);
     }
 
     #[test]
     fn test_cache_efficiency_lifts_score() {
-        let cold = Turn {
-            time: String::new(), prompt: String::new(),
-            input: 1000, output: 0, cost: 0.0, roundtrips: 5, cache_read: 0, cache_creation: 0,
-        };
-        let warm = Turn {
-            time: String::new(), prompt: String::new(),
-            input: 100, output: 0, cost: 0.0, roundtrips: 5, cache_read: 900, cache_creation: 0,
-        };
+        let cold = turn(5, 1000, 0);
+        let warm = turn(5, 100, 900);
         assert!(warm.efficiency_score().unwrap() > cold.efficiency_score().unwrap());
+    }
+
+    #[test]
+    fn test_pre_prompt_bucket_is_not_scored() {
+        let mut synthetic = turn(5, 100, 900);
+        synthetic.synthetic = true;
+        assert_eq!(
+            synthetic.efficiency_score(),
+            None,
+            "a bucket with no typed prompt behind it must not be scored"
+        );
+    }
+
+    #[test]
+    fn test_messages_before_first_prompt_go_to_pre_prompt_turn() {
+        // A resumed session: assistant work arrives before any typed prompt.
+        let messages = vec![
+            msg("assistant", None, 10, 20, 0),
+            msg("assistant", None, 5, 15, 0),
+            msg("user", Some("now fix it"), 0, 0, 0),
+            msg("assistant", None, 1, 2, 0),
+        ];
+        let turns = build_turns(&messages);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].prompt, PRE_PROMPT_LABEL);
+        assert!(turns[0].synthetic);
+        assert_eq!(turns[0].output, 35, "orphan tokens must not vanish");
+        assert_eq!(turns[1].prompt, "now fix it");
+        assert_eq!(turns[1].output, 2);
+    }
+
+    #[test]
+    fn test_turn_totals_reconcile_with_message_totals() {
+        let mut messages = vec![
+            msg("assistant", None, 10, 20, 5),
+            msg("user", Some("first"), 0, 0, 0),
+            msg("assistant", None, 7, 9, 3),
+            msg("user", None, 0, 0, 0),
+            msg("assistant", None, 4, 6, 1),
+            msg("user", Some("second"), 0, 0, 0),
+            msg("assistant", None, 2, 3, 0),
+        ];
+        for (i, m) in messages.iter_mut().enumerate() {
+            m.cost_usd = (i as f64 + 1.0) * 0.25;
+        }
+
+        let turns = build_turns(&messages);
+        let turn_output: i64 = turns.iter().map(|t| t.output).sum();
+        let turn_cost: f64 = turns.iter().map(|t| t.cost).sum();
+        let msg_output: i64 = messages.iter().map(|m| m.output_tokens).sum();
+        let msg_cost: f64 = messages.iter().map(|m| m.cost_usd).sum();
+
+        assert_eq!(turn_output, msg_output);
+        assert!(
+            (turn_cost - msg_cost).abs() < 1e-9,
+            "turn rows ({}) must sum to the session total in the header ({})",
+            turn_cost,
+            msg_cost
+        );
+    }
+
+    #[test]
+    fn test_clip_measures_display_width_not_char_count() {
+        // Each CJK codepoint is 2 cells: 4 chars would be 8 cells, over budget.
+        let clipped = clip("日本語テスト", 6);
+        assert!(
+            clipped.width() <= 6,
+            "clipped {:?} is {} cells, over the 6-cell column",
+            clipped,
+            clipped.width()
+        );
+        // ASCII is unchanged when it fits.
+        assert_eq!(clip("hello", 10), "hello");
+        assert_eq!(clip("hello world", 5), "hell\u{2026}");
     }
 }
